@@ -7,13 +7,25 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "strata/status.h"
+#include "util/coding.h"
+
 namespace strata::crc32c {
 namespace {
+
+// Mask and Unmask are constexpr and invert each other.
+static_assert(Mask(0) == kMaskDelta);
+static_assert(Unmask(kMaskDelta) == 0);
+static_assert(Unmask(Mask(0x12345678U)) == 0x12345678U);
+static_assert(Unmask(Mask(0x8A9136AAU)) == 0x8A9136AAU);
+static_assert(Mask(0x12345678U) != 0x12345678U);
 
 TEST(Crc32cTest, RFC3720TestVectors) {
   // Test vectors from RFC 3720 (iSCSI), Appendix B.4.
@@ -211,14 +223,179 @@ TEST(Crc32cTest, MaskingScramblesValue) {
   }
 }
 
+TEST(Crc32cTest, StringViewOverloads) {
+  std::string_view null_view;
+  EXPECT_EQ(Value(null_view), 0U);
+  EXPECT_EQ(Extend(0, null_view), 0U);
+  EXPECT_EQ(Extend(0x12345678U, null_view), 0x12345678U);
+
+  const std::string text = "the quick brown fox jumps over the lazy dog";
+  EXPECT_EQ(Value(std::string_view(text)), Value(text.data(), text.size()));
+  EXPECT_EQ(Extend(0x12345678U, std::string_view(text)),
+            Extend(0x12345678U, text.data(), text.size()));
+}
+
+TEST(Crc32cTest, SingleBitFlipsShortBuffers) {
+  // Test bit flips on 1-byte, 2-byte, 3-byte, and 4-byte buffers.
+  for (size_t len = 1; len <= 4; ++len) {
+    std::string buf(len, '\x55');
+    const uint32_t base_crc = Value(buf);
+    for (size_t i = 0; i < len; ++i) {
+      for (int bit = 0; bit < 8; ++bit) {
+        buf[i] ^= static_cast<char>(1 << bit);
+        EXPECT_NE(Value(buf), base_crc);
+        buf[i] ^= static_cast<char>(1 << bit);
+      }
+    }
+  }
+}
+
 TEST(Crc32cTest, NegativeCharValues) {
   // Ensure that char values with MSB set (negative when char is signed)
-  // do not cause out-of-bounds array access due to sign extension.
+  // produce identical results to uint8_t and do not cause out-of-bounds array access.
   const char high_bytes[] = {static_cast<char>(0x80), static_cast<char>(0x99),
                              static_cast<char>(0xAA), static_cast<char>(0xBB),
                              static_cast<char>(0xFF)};
-  uint32_t crc = Value(high_bytes, sizeof(high_bytes));
-  EXPECT_NE(crc, 0U);
+  const uint8_t unsigned_bytes[] = {0x80, 0x99, 0xAA, 0xBB, 0xFF};
+
+  const uint32_t crc_signed = Value(high_bytes, sizeof(high_bytes));
+  const uint32_t crc_unsigned =
+      Value(reinterpret_cast<const char*>(unsigned_bytes), sizeof(unsigned_bytes));
+
+  EXPECT_EQ(crc_signed, crc_unsigned);
+  EXPECT_NE(crc_signed, 0U);
+}
+
+TEST(Crc32cTest, WalRecordBitFlipReturnsCorruption) {
+  // Simulates a WAL record header: [masked_crc: 4][length: 2][type: 1][payload: N]
+  // CRC covers the type byte plus the payload.
+  const char record_type = 1;  // kFullType
+  const std::string payload = "wal record payload with simulated key-value mutation";
+
+  // Build WAL record.
+  const uint32_t raw_crc = Extend(Value(&record_type, 1), payload);
+  std::string record;
+  PutFixed32(&record, Mask(raw_crc));
+  record.push_back(static_cast<char>(payload.size() & 0xFF));
+  record.push_back(static_cast<char>((payload.size() >> 8) & 0xFF));
+  record.push_back(record_type);
+  record.append(payload);
+
+  auto parse_and_verify = [](std::string_view rec) -> Status {
+    if (rec.size() < 7U) {
+      return Status::Corruption("WAL record too short");
+    }
+    const uint32_t stored_masked = DecodeFixed32(rec.data());
+    const uint16_t length =
+        static_cast<uint8_t>(rec[4]) | (static_cast<uint16_t>(static_cast<uint8_t>(rec[5])) << 8);
+    if (rec.size() < 7U + length) {
+      return Status::Corruption("WAL record truncated");
+    }
+    const char type = rec[6];
+    std::string_view rec_payload = rec.substr(7, length);
+    const uint32_t expected_crc = Unmask(stored_masked);
+    const uint32_t actual_crc = Extend(Value(&type, 1), rec_payload);
+    if (actual_crc != expected_crc) {
+      return Status::Corruption("WAL record checksum mismatch");
+    }
+    return Status::OK();
+  };
+
+  // Valid record succeeds.
+  EXPECT_TRUE(parse_and_verify(record).ok());
+
+  // Flipping any single bit in the record must cause Corruption.
+  for (size_t byte_idx = 0; byte_idx < record.size(); ++byte_idx) {
+    for (int bit = 0; bit < 8; ++bit) {
+      std::string corrupted = record;
+      corrupted[byte_idx] ^= static_cast<char>(1 << bit);
+      Status s = parse_and_verify(corrupted);
+      EXPECT_TRUE(s.IsCorruption())
+          << "Failed to detect corruption at byte " << byte_idx << ", bit " << bit;
+    }
+  }
+}
+
+TEST(Crc32cTest, SstableBlockTrailerBitFlipReturnsCorruption) {
+  // Simulates SSTable block: [block contents: N][type: 1][masked_crc: 4]
+  // CRC covers block contents plus type byte.
+  const std::string block_contents = "key1:val1,key2:val2,key3:val3 index and data block entries";
+  const char compression_type = 0;  // kNoCompression
+
+  const uint32_t raw_crc = Extend(Value(block_contents), &compression_type, 1);
+  std::string block = block_contents;
+  block.push_back(compression_type);
+  PutFixed32(&block, Mask(raw_crc));
+
+  auto parse_and_verify_block = [](std::string_view blk) -> Status {
+    if (blk.size() < 5U) {
+      return Status::Corruption("Block too short");
+    }
+    const size_t content_size = blk.size() - 5U;
+    std::string_view contents = blk.substr(0, content_size);
+    const char type = blk[content_size];
+    const uint32_t stored_masked = DecodeFixed32(blk.data() + content_size + 1);
+    const uint32_t expected_crc = Unmask(stored_masked);
+    const uint32_t actual_crc = Extend(Value(contents), &type, 1);
+    if (actual_crc != expected_crc) {
+      return Status::Corruption("Block trailer checksum mismatch");
+    }
+    return Status::OK();
+  };
+
+  // Valid block succeeds.
+  EXPECT_TRUE(parse_and_verify_block(block).ok());
+
+  // Flipping any single bit in the block (contents, type, or trailer CRC) must cause Corruption.
+  for (size_t byte_idx = 0; byte_idx < block.size(); ++byte_idx) {
+    for (int bit = 0; bit < 8; ++bit) {
+      std::string corrupted = block;
+      corrupted[byte_idx] ^= static_cast<char>(1 << bit);
+      Status s = parse_and_verify_block(corrupted);
+      EXPECT_TRUE(s.IsCorruption())
+          << "Failed to detect corruption at byte " << byte_idx << ", bit " << bit;
+    }
+  }
+}
+
+TEST(Crc32cTest, RawCrcSelfAppendIsConstantWhileMaskedVaries) {
+  // Mathematical property noted in specification:
+  // Computing CRC over data that ends with its own unmasked CRC produces a fixed constant.
+  // Masking scrambles the stored value so this structural regularity disappears.
+  const std::vector<std::string> test_strings = {
+      "hello world", "StrataDB storage engine", std::string(64, 'z'),
+      "123456789",   std::string(128, '\0'),    "arbitrary test payload with some length",
+  };
+
+  std::optional<uint32_t> raw_constant;
+  std::set<uint32_t> masked_results;
+
+  for (const auto& data : test_strings) {
+    const uint32_t raw_crc = Value(data);
+    char raw_buf[sizeof(uint32_t)];
+    EncodeFixed32(raw_buf, raw_crc);
+    std::string data_with_raw = data + std::string(raw_buf, sizeof(raw_buf));
+    const uint32_t crc_of_raw = Value(data_with_raw);
+
+    if (!raw_constant.has_value()) {
+      raw_constant = crc_of_raw;
+    } else {
+      EXPECT_EQ(crc_of_raw, *raw_constant)
+          << "CRC of data ending with unmasked CRC should be constant";
+    }
+
+    // Now with masked CRC:
+    char masked_buf[sizeof(uint32_t)];
+    EncodeFixed32(masked_buf, Mask(raw_crc));
+    std::string data_with_masked = data + std::string(masked_buf, sizeof(masked_buf));
+    const uint32_t crc_of_masked = Value(data_with_masked);
+
+    EXPECT_NE(crc_of_masked, *raw_constant);
+    masked_results.insert(crc_of_masked);
+  }
+
+  // Masked values across different payloads should all produce different CRCs.
+  EXPECT_EQ(masked_results.size(), test_strings.size());
 }
 
 TEST(Crc32cTest, SpeedBenchmark) {

@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "util/check.h"
+
 namespace strata::crc32c {
 namespace {
 
@@ -32,11 +34,16 @@ constexpr auto kTable = MakeTable();
 }  // namespace
 
 uint32_t Extend(uint32_t init_crc, const char* data, size_t n) {
+  if (n == 0) {
+    return init_crc;
+  }
+  STRATA_DCHECK(data != nullptr);
   const auto* p = reinterpret_cast<const uint8_t*>(data);
   // Undo the final inversion applied to init_crc before feeding in new bytes.
   uint32_t crc = init_crc ^ 0xFFFFFFFFU;
-  for (size_t i = 0; i < n; ++i) {
-    crc = kTable[(crc ^ p[i]) & 0xFFU] ^ (crc >> 8);
+  const auto* const limit = p + n;
+  while (p < limit) {
+    crc = kTable[(crc ^ *p++) & 0xFFU] ^ (crc >> 8);
   }
   return crc ^ 0xFFFFFFFFU;
 }
