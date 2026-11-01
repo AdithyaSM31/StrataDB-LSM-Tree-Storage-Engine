@@ -204,8 +204,12 @@ class EnvWrapper : public Env {
 // Wrapper classes forwarding to underlying file implementations.
 class SequentialFileWrapper : public SequentialFile {
  public:
+  explicit SequentialFileWrapper(std::unique_ptr<SequentialFile> target)
+      : target_(std::move(target)) {}
   explicit SequentialFileWrapper(SequentialFile* target) : target_(target) {}
   ~SequentialFileWrapper() override = default;
+
+  SequentialFile* target() const { return target_.get(); }
 
   Status Read(size_t n, std::string_view* result, char* scratch) override {
     return target_->Read(n, result, scratch);
@@ -213,26 +217,33 @@ class SequentialFileWrapper : public SequentialFile {
   Status Skip(uint64_t n) override { return target_->Skip(n); }
 
  private:
-  SequentialFile* target_;
+  std::unique_ptr<SequentialFile> target_;
 };
 
 class RandomAccessFileWrapper : public RandomAccessFile {
  public:
+  explicit RandomAccessFileWrapper(std::unique_ptr<RandomAccessFile> target)
+      : target_(std::move(target)) {}
   explicit RandomAccessFileWrapper(RandomAccessFile* target) : target_(target) {}
   ~RandomAccessFileWrapper() override = default;
+
+  RandomAccessFile* target() const { return target_.get(); }
 
   Status Read(uint64_t offset, size_t n, std::string_view* result, char* scratch) const override {
     return target_->Read(offset, n, result, scratch);
   }
 
  private:
-  RandomAccessFile* target_;
+  std::unique_ptr<RandomAccessFile> target_;
 };
 
 class WritableFileWrapper : public WritableFile {
  public:
+  explicit WritableFileWrapper(std::unique_ptr<WritableFile> target) : target_(std::move(target)) {}
   explicit WritableFileWrapper(WritableFile* target) : target_(target) {}
   ~WritableFileWrapper() override = default;
+
+  WritableFile* target() const { return target_.get(); }
 
   Status Append(std::string_view data) override { return target_->Append(data); }
   Status Flush() override { return target_->Flush(); }
@@ -240,7 +251,7 @@ class WritableFileWrapper : public WritableFile {
   Status Close() override { return target_->Close(); }
 
  private:
-  WritableFile* target_;
+  std::unique_ptr<WritableFile> target_;
 };
 
 }  // namespace strata

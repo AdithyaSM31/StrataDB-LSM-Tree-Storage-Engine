@@ -570,5 +570,165 @@ TEST_F(EnvTest, BufferBoundaryAppendAndFlush) {
   EXPECT_EQ(res, chunk_64k_plus_1);
 }
 
+TEST_F(EnvTest, FsyncgateStickyErrorOnDiskFull) {
+  // /dev/full is a standard POSIX device that always returns ENOSPC on write.
+  if (!env_->FileExists("/dev/full")) {
+    GTEST_SKIP() << "/dev/full is not available on this platform";
+  }
+
+  std::unique_ptr<WritableFile> w;
+  ASSERT_TRUE(env_->NewWritableFile("/dev/full", &w).ok());
+
+  // Attempting to append and flush data to /dev/full triggers ENOSPC.
+  ASSERT_TRUE(w->Append("data to fill buffer").ok());
+  Status flush_status = w->Flush();
+  EXPECT_FALSE(flush_status.ok());
+  EXPECT_TRUE(flush_status.IsIOError());
+
+  // Fsyncgate durability contract: Once a write or sync fails, subsequent calls
+  // must immediately fail with the latched sticky error and never attempt retries.
+  Status append_after_error = w->Append("subsequent write");
+  EXPECT_FALSE(append_after_error.ok());
+  EXPECT_TRUE(append_after_error.IsIOError());
+
+  Status sync_after_error = w->Sync();
+  EXPECT_FALSE(sync_after_error.ok());
+  EXPECT_TRUE(sync_after_error.IsIOError());
+
+  // Close() must NOT swallow the sticky error and return OK. It must propagate the error.
+  Status close_status = w->Close();
+  EXPECT_FALSE(close_status.ok());
+  EXPECT_TRUE(close_status.IsIOError());
+
+  // Repeated close is idempotent OK.
+  EXPECT_TRUE(w->Close().ok());
+}
+
+TEST_F(EnvTest, ReadBoundaryAndNullScratchValidation) {
+  std::string file_path = Path("boundary_reads.dat");
+  std::unique_ptr<WritableFile> w;
+  ASSERT_TRUE(env_->NewWritableFile(file_path, &w).ok());
+  ASSERT_TRUE(w->Append("0123456789").ok());
+  ASSERT_TRUE(w->Close().ok());
+
+  std::unique_ptr<RandomAccessFile> rnd;
+  ASSERT_TRUE(env_->NewRandomAccessFile(file_path, &rnd).ok());
+
+  char scratch[64];
+  std::string_view result;
+
+  // offset exceeding off_t max
+  constexpr uint64_t kOverMaxOff = static_cast<uint64_t>(std::numeric_limits<off_t>::max()) + 1ULL;
+  EXPECT_TRUE(rnd->Read(kOverMaxOff, 10, &result, scratch).IsInvalidArgument());
+
+  // n exceeding off_t max must not wrap around in unsigned subtraction
+  constexpr uint64_t kHugeN = (1ULL << 63) + 100ULL;
+  EXPECT_TRUE(rnd->Read(100, kHugeN, &result, scratch).IsInvalidArgument());
+
+  // offset + n exceeding off_t max
+  constexpr uint64_t kNearMaxOff = static_cast<uint64_t>(std::numeric_limits<off_t>::max()) - 5ULL;
+  EXPECT_TRUE(rnd->Read(kNearMaxOff, 10, &result, scratch).IsInvalidArgument());
+
+  // null scratch with n > 0 must fail with InvalidArgument
+  EXPECT_TRUE(rnd->Read(0, 5, &result, nullptr).IsInvalidArgument());
+
+  // null scratch with n == 0 is valid and returns empty result
+  ASSERT_TRUE(rnd->Read(0, 0, &result, nullptr).ok());
+  EXPECT_TRUE(result.empty());
+
+  // SequentialFile null scratch check
+  std::unique_ptr<SequentialFile> seq;
+  ASSERT_TRUE(env_->NewSequentialFile(file_path, &seq).ok());
+  EXPECT_TRUE(seq->Read(5, &result, nullptr).IsInvalidArgument());
+  ASSERT_TRUE(seq->Read(0, &result, nullptr).ok());
+  EXPECT_TRUE(result.empty());
+
+  // SequentialFile::Skip overflow check
+  EXPECT_TRUE(seq->Skip(kOverMaxOff).IsInvalidArgument());
+}
+
+TEST_F(EnvTest, BufferTransitionSmallAndLargeWrites) {
+  std::string file_path = Path("mixed_buffer.dat");
+  std::unique_ptr<WritableFile> w;
+  ASSERT_TRUE(env_->NewWritableFile(file_path, &w).ok());
+
+  // Construct distinct patterns
+  std::string chunk_50k(50000, 'X');
+  std::string chunk_20k(20000, 'Y');
+  std::string chunk_100k(100000, 'Z');
+  std::string chunk_30k(30000, 'W');
+
+  std::string full_expected = chunk_50k + chunk_20k + chunk_100k + chunk_30k;
+
+  // 1. Write 50 KB (buffered, 50k / 64k)
+  ASSERT_TRUE(w->Append(chunk_50k).ok());
+  // 2. Write 20 KB (transitions buffer to full, flushes 64 KB, retains 6 KB in buffer)
+  ASSERT_TRUE(w->Append(chunk_20k).ok());
+  // 3. Write 100 KB (flushes 6 KB, writes 100 KB directly unbuffered)
+  ASSERT_TRUE(w->Append(chunk_100k).ok());
+  // 4. Write 30 KB (buffered into empty buffer)
+  ASSERT_TRUE(w->Append(chunk_30k).ok());
+
+  ASSERT_TRUE(w->Flush().ok());
+  ASSERT_TRUE(w->Sync().ok());
+  ASSERT_TRUE(w->Close().ok());
+
+  uint64_t file_size = 0;
+  ASSERT_TRUE(env_->GetFileSize(file_path, &file_size).ok());
+  EXPECT_EQ(file_size, full_expected.size());
+
+  // Verify byte-for-byte correctness sequentially
+  std::unique_ptr<SequentialFile> seq;
+  ASSERT_TRUE(env_->NewSequentialFile(file_path, &seq).ok());
+  std::vector<char> scratch(full_expected.size());
+  std::string_view read_result;
+  ASSERT_TRUE(seq->Read(full_expected.size(), &read_result, scratch.data()).ok());
+  EXPECT_EQ(read_result, full_expected);
+}
+
+TEST_F(EnvTest, FileWrappersDelegationAndOwnership) {
+  std::string file_path = Path("wrapper_file.dat");
+
+  // Test WritableFileWrapper with unique_ptr ownership
+  std::unique_ptr<WritableFile> base_w;
+  ASSERT_TRUE(env_->NewWritableFile(file_path, &base_w).ok());
+  WritableFile* raw_base_w = base_w.get();
+
+  auto w_wrapper = std::make_unique<WritableFileWrapper>(std::move(base_w));
+  EXPECT_EQ(w_wrapper->target(), raw_base_w);
+  ASSERT_TRUE(w_wrapper->Append("hello wrapper").ok());
+  ASSERT_TRUE(w_wrapper->Flush().ok());
+  ASSERT_TRUE(w_wrapper->Sync().ok());
+  ASSERT_TRUE(w_wrapper->Close().ok());
+  w_wrapper.reset();  // Should cleanly destroy underlying WritableFile
+
+  // Test SequentialFileWrapper
+  std::unique_ptr<SequentialFile> base_seq;
+  ASSERT_TRUE(env_->NewSequentialFile(file_path, &base_seq).ok());
+  SequentialFile* raw_base_seq = base_seq.get();
+
+  auto seq_wrapper = std::make_unique<SequentialFileWrapper>(std::move(base_seq));
+  EXPECT_EQ(seq_wrapper->target(), raw_base_seq);
+  char scratch[64];
+  std::string_view res;
+  ASSERT_TRUE(seq_wrapper->Read(5, &res, scratch).ok());
+  EXPECT_EQ(res, "hello");
+  ASSERT_TRUE(seq_wrapper->Skip(1).ok());
+  ASSERT_TRUE(seq_wrapper->Read(7, &res, scratch).ok());
+  EXPECT_EQ(res, "wrapper");
+  seq_wrapper.reset();
+
+  // Test RandomAccessFileWrapper
+  std::unique_ptr<RandomAccessFile> base_rnd;
+  ASSERT_TRUE(env_->NewRandomAccessFile(file_path, &base_rnd).ok());
+  RandomAccessFile* raw_base_rnd = base_rnd.get();
+
+  auto rnd_wrapper = std::make_unique<RandomAccessFileWrapper>(std::move(base_rnd));
+  EXPECT_EQ(rnd_wrapper->target(), raw_base_rnd);
+  ASSERT_TRUE(rnd_wrapper->Read(6, 7, &res, scratch).ok());
+  EXPECT_EQ(res, "wrapper");
+  rnd_wrapper.reset();
+}
+
 }  // namespace
 }  // namespace strata

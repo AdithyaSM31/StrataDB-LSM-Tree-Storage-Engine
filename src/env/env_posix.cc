@@ -57,14 +57,19 @@ class PosixSequentialFile : public SequentialFile {
     if (result == nullptr) {
       return Status::InvalidArgument("result pointer is null");
     }
+    if (n > 0 && scratch == nullptr) {
+      return Status::InvalidArgument("scratch pointer is null");
+    }
     size_t total_read = 0;
     while (total_read < n) {
-      ssize_t r = ::read(fd_, scratch + total_read, n - total_read);
+      size_t chunk = std::min(n - total_read, static_cast<size_t>(1 << 30));
+      ssize_t r = ::read(fd_, scratch + total_read, chunk);
       if (r < 0) {
-        if (errno == EINTR) {
+        const int err = errno;
+        if (err == EINTR) {
           continue;
         }
-        return PosixError(filename_, errno);
+        return PosixError(filename_, err);
       }
       if (r == 0) {
         // EOF reached.
@@ -77,11 +82,13 @@ class PosixSequentialFile : public SequentialFile {
   }
 
   Status Skip(uint64_t n) override {
-    if (n > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+    constexpr uint64_t kMaxOff = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+    if (n > kMaxOff) {
       return Status::InvalidArgument(filename_, "skip offset exceeds off_t max");
     }
     if (::lseek(fd_, static_cast<off_t>(n), SEEK_CUR) == static_cast<off_t>(-1)) {
-      return PosixError(filename_, errno);
+      const int err = errno;
+      return PosixError(filename_, err);
     }
     return Status::OK();
   }
@@ -108,22 +115,28 @@ class PosixRandomAccessFile : public RandomAccessFile {
     if (result == nullptr) {
       return Status::InvalidArgument("result pointer is null");
     }
-    if (offset > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+    if (n > 0 && scratch == nullptr) {
+      return Status::InvalidArgument("scratch pointer is null");
+    }
+    constexpr uint64_t kMaxOff = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+    if (offset > kMaxOff) {
       return Status::InvalidArgument(filename_, "offset exceeds off_t max");
     }
-    if (offset > static_cast<uint64_t>(std::numeric_limits<off_t>::max()) - n) {
+    if (n > kMaxOff || offset > kMaxOff - n) {
       return Status::InvalidArgument(filename_, "offset + size exceeds off_t max");
     }
 
     size_t total_read = 0;
     while (total_read < n) {
-      ssize_t r = ::pread(fd_, scratch + total_read, n - total_read,
-                          static_cast<off_t>(offset + total_read));
+      size_t chunk = std::min(n - total_read, static_cast<size_t>(1 << 30));
+      ssize_t r =
+          ::pread(fd_, scratch + total_read, chunk, static_cast<off_t>(offset + total_read));
       if (r < 0) {
-        if (errno == EINTR) {
+        const int err = errno;
+        if (err == EINTR) {
           continue;
         }
-        return PosixError(filename_, errno);
+        return PosixError(filename_, err);
       }
       if (r == 0) {
         // Reached end of file; short read is expected, not an error.
@@ -150,11 +163,11 @@ class PosixWritableFile : public WritableFile {
         buf_(std::make_unique<char[]>(kBufferSize)),
         buf_pos_(0),
         closed_(false),
-        has_error_(false) {}
+        status_(Status::OK()) {}
 
   ~PosixWritableFile() override {
     if (!closed_ && fd_ >= 0) {
-      if (!has_error_) {
+      if (status_.ok()) {
         (void)FlushBuffer();
       }
       ::close(fd_);
@@ -168,43 +181,45 @@ class PosixWritableFile : public WritableFile {
     if (closed_) {
       return Status::IOError(filename_, "file already closed");
     }
-    if (has_error_) {
-      return Status::IOError(filename_, "file has previous error");
+    if (!status_.ok()) {
+      return status_;
     }
 
-    // 1. Fits in remaining buffer space.
-    if (data.size() <= kBufferSize - buf_pos_) {
-      std::memcpy(buf_.get() + buf_pos_, data.data(), data.size());
-      buf_pos_ += data.size();
-      return Status::OK();
-    }
-
-    // 2. Buffer has existing bytes that cannot hold all of data; flush them.
-    if (buf_pos_ > 0) {
-      Status s = FlushBuffer();
-      if (!s.ok()) {
-        return s;
-      }
-    }
-
-    // Buffer is now empty.
-    // 3. Writes larger than the buffer bypass it entirely.
-    if (data.size() >= kBufferSize) {
+    // Direct unbuffered write if buffer is currently empty and incoming write >= 64 KB.
+    if (buf_pos_ == 0 && data.size() >= kBufferSize) {
       return WriteUnbuffered(data.data(), data.size());
     }
 
-    // 4. Smaller write into empty buffer.
-    std::memcpy(buf_.get(), data.data(), data.size());
-    buf_pos_ = data.size();
-    return Status::OK();
+    // Fill remaining buffer space.
+    size_t copy_size = std::min(data.size(), kBufferSize - buf_pos_);
+    std::memcpy(buf_.get() + buf_pos_, data.data(), copy_size);
+    buf_pos_ += copy_size;
+    data.remove_prefix(copy_size);
+    if (data.empty()) {
+      return Status::OK();
+    }
+
+    // Buffer is full (buf_pos_ == kBufferSize). Flush it out.
+    Status s = FlushBuffer();
+    if (!s.ok()) {
+      return s;
+    }
+
+    // After emptying buffer, small writes go into buffer; large writes bypass it.
+    if (data.size() < kBufferSize) {
+      std::memcpy(buf_.get(), data.data(), data.size());
+      buf_pos_ = data.size();
+      return Status::OK();
+    }
+    return WriteUnbuffered(data.data(), data.size());
   }
 
   Status Flush() override {
     if (closed_) {
       return Status::IOError(filename_, "file already closed");
     }
-    if (has_error_) {
-      return Status::IOError(filename_, "file has previous error");
+    if (!status_.ok()) {
+      return status_;
     }
     return FlushBuffer();
   }
@@ -213,8 +228,8 @@ class PosixWritableFile : public WritableFile {
     if (closed_) {
       return Status::IOError(filename_, "file already closed");
     }
-    if (has_error_) {
-      return Status::IOError(filename_, "file has previous error (fsyncgate)");
+    if (!status_.ok()) {
+      return status_;
     }
     Status s = FlushBuffer();
     if (!s.ok()) {
@@ -222,15 +237,15 @@ class PosixWritableFile : public WritableFile {
     }
 #if defined(__APPLE__)
     if (::fcntl(fd_, F_FULLFSYNC) != 0) {
-      int err = errno;
-      has_error_ = true;
-      return PosixError(filename_, err);
+      const int err = errno;
+      status_ = PosixError(filename_, err);
+      return status_;
     }
 #else
     if (::fdatasync(fd_) != 0) {
-      int err = errno;
-      has_error_ = true;
-      return PosixError(filename_, err);
+      const int err = errno;
+      status_ = PosixError(filename_, err);
+      return status_;
     }
 #endif
     return Status::OK();
@@ -240,32 +255,36 @@ class PosixWritableFile : public WritableFile {
     if (closed_) {
       return Status::OK();
     }
-    Status s = Status::OK();
-    if (!has_error_) {
+    closed_ = true;
+    Status s = status_;
+    if (s.ok()) {
       s = FlushBuffer();
     }
     if (::close(fd_) != 0) {
-      int err = errno;
+      const int err = errno;
       if (s.ok()) {
         s = PosixError(filename_, err);
       }
     }
     fd_ = -1;
-    closed_ = true;
+    if (!s.ok() && status_.ok()) {
+      status_ = s;
+    }
     return s;
   }
 
  private:
   Status WriteUnbuffered(const char* data, size_t size) {
     while (size > 0) {
-      ssize_t r = ::write(fd_, data, size);
+      size_t chunk = std::min(size, static_cast<size_t>(1 << 30));
+      ssize_t r = ::write(fd_, data, chunk);
       if (r < 0) {
-        if (errno == EINTR) {
+        const int err = errno;
+        if (err == EINTR) {
           continue;
         }
-        int err = errno;
-        has_error_ = true;
-        return PosixError(filename_, err);
+        status_ = PosixError(filename_, err);
+        return status_;
       }
       data += r;
       size -= static_cast<size_t>(r);
@@ -279,7 +298,6 @@ class PosixWritableFile : public WritableFile {
     }
     Status s = WriteUnbuffered(buf_.get(), buf_pos_);
     if (!s.ok()) {
-      has_error_ = true;
       return s;
     }
     buf_pos_ = 0;
@@ -291,24 +309,34 @@ class PosixWritableFile : public WritableFile {
   std::unique_ptr<char[]> buf_;
   size_t buf_pos_;
   bool closed_;
-  bool has_error_;
+  Status status_;
 };
 
 class PosixFileLock : public FileLock {
  public:
   PosixFileLock(int fd, std::string fname) : fd_(fd), fname_(std::move(fname)) {}
 
-  ~PosixFileLock() override { Unlock(); }
+  ~PosixFileLock() override { (void)Unlock(); }
 
   PosixFileLock(const PosixFileLock&) = delete;
   PosixFileLock& operator=(const PosixFileLock&) = delete;
 
-  void Unlock() {
+  Status Unlock() {
+    Status s = Status::OK();
     if (fd_ >= 0) {
-      ::flock(fd_, LOCK_UN);
-      ::close(fd_);
+      if (::flock(fd_, LOCK_UN) != 0) {
+        const int err = errno;
+        s = PosixError(fname_, err);
+      }
+      if (::close(fd_) != 0) {
+        const int err = errno;
+        if (s.ok()) {
+          s = PosixError(fname_, err);
+        }
+      }
       fd_ = -1;
     }
+    return s;
   }
 
   int fd() const { return fd_; }
@@ -327,9 +355,13 @@ Status PosixEnv::NewSequentialFile(const std::string& fname,
     return Status::InvalidArgument("result pointer is null");
   }
   result->reset();
-  int fd = ::open(fname.c_str(), O_RDONLY | O_CLOEXEC);
+  int fd;
+  do {
+    fd = ::open(fname.c_str(), O_RDONLY | O_CLOEXEC);
+  } while (fd < 0 && errno == EINTR);
   if (fd < 0) {
-    return PosixError(fname, errno);
+    const int err = errno;
+    return PosixError(fname, err);
   }
   *result = std::make_unique<PosixSequentialFile>(fname, fd);
   return Status::OK();
@@ -341,9 +373,13 @@ Status PosixEnv::NewRandomAccessFile(const std::string& fname,
     return Status::InvalidArgument("result pointer is null");
   }
   result->reset();
-  int fd = ::open(fname.c_str(), O_RDONLY | O_CLOEXEC);
+  int fd;
+  do {
+    fd = ::open(fname.c_str(), O_RDONLY | O_CLOEXEC);
+  } while (fd < 0 && errno == EINTR);
   if (fd < 0) {
-    return PosixError(fname, errno);
+    const int err = errno;
+    return PosixError(fname, err);
   }
   *result = std::make_unique<PosixRandomAccessFile>(fname, fd);
   return Status::OK();
@@ -354,9 +390,13 @@ Status PosixEnv::NewWritableFile(const std::string& fname, std::unique_ptr<Writa
     return Status::InvalidArgument("result pointer is null");
   }
   result->reset();
-  int fd = ::open(fname.c_str(), O_TRUNC | O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+  int fd;
+  do {
+    fd = ::open(fname.c_str(), O_TRUNC | O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+  } while (fd < 0 && errno == EINTR);
   if (fd < 0) {
-    return PosixError(fname, errno);
+    const int err = errno;
+    return PosixError(fname, err);
   }
   *result = std::make_unique<PosixWritableFile>(fname, fd);
   return Status::OK();
@@ -383,6 +423,7 @@ Status PosixEnv::GetChildren(const std::string& dir, std::vector<std::string>* r
     it.increment(ec);
   }
   if (ec) {
+    result->clear();
     return PosixError(dir, ec);
   }
   return Status::OK();
@@ -444,18 +485,23 @@ Status PosixEnv::GetFileSize(const std::string& fname, uint64_t* size) {
 
 Status PosixEnv::RenameFile(const std::string& src, const std::string& target) {
   if (::rename(src.c_str(), target.c_str()) != 0) {
-    return PosixError(src, errno);
+    const int err = errno;
+    return PosixError(src, err);
   }
   return Status::OK();
 }
 
 Status PosixEnv::SyncDir(const std::string& dir) {
-  int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  int fd;
+  do {
+    fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  } while (fd < 0 && errno == EINTR);
   if (fd < 0) {
-    return PosixError(dir, errno);
+    const int err = errno;
+    return PosixError(dir, err);
   }
   int res = ::fsync(fd);
-  int err = errno;
+  const int err = errno;
   ::close(fd);
   if (res != 0) {
     return PosixError(dir, err);
@@ -468,12 +514,20 @@ Status PosixEnv::LockFile(const std::string& fname, std::unique_ptr<FileLock>* l
     return Status::InvalidArgument("lock pointer is null");
   }
   lock->reset();
-  int fd = ::open(fname.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  int fd;
+  do {
+    fd = ::open(fname.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  } while (fd < 0 && errno == EINTR);
   if (fd < 0) {
-    return PosixError(fname, errno);
+    const int err = errno;
+    return PosixError(fname, err);
   }
-  if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-    int err = errno;
+  int flock_res;
+  do {
+    flock_res = ::flock(fd, LOCK_EX | LOCK_NB);
+  } while (flock_res != 0 && errno == EINTR);
+  if (flock_res != 0) {
+    const int err = errno;
     ::close(fd);
     if (err == EWOULDBLOCK || err == EAGAIN) {
       return Status::IOError(fname, "lock held by another process");
@@ -488,8 +542,13 @@ Status PosixEnv::UnlockFile(std::unique_ptr<FileLock> lock) {
   if (!lock) {
     return Status::InvalidArgument("lock is null");
   }
+  auto* posix_lock = dynamic_cast<PosixFileLock*>(lock.get());
+  Status s = Status::OK();
+  if (posix_lock != nullptr) {
+    s = posix_lock->Unlock();
+  }
   lock.reset();
-  return Status::OK();
+  return s;
 }
 
 uint64_t PosixEnv::NowMicros() {
