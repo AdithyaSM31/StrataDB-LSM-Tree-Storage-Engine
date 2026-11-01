@@ -18,7 +18,7 @@ constexpr std::array<uint32_t, 256> MakeTable() {
   for (uint32_t i = 0; i < 256; ++i) {
     uint32_t crc = i;
     for (int bit = 0; bit < 8; ++bit) {
-      if (crc & 1) {
+      if ((crc & 1) != 0) {
         crc = (crc >> 1) ^ kPolynomial;
       } else {
         crc = crc >> 1;

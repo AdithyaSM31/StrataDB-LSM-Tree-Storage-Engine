@@ -2,11 +2,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
-#include <numeric>
 #include <optional>
 #include <random>
 #include <set>
@@ -26,6 +26,12 @@ static_assert(Unmask(kMaskDelta) == 0);
 static_assert(Unmask(Mask(0x12345678U)) == 0x12345678U);
 static_assert(Unmask(Mask(0x8A9136AAU)) == 0x8A9136AAU);
 static_assert(Mask(0x12345678U) != 0x12345678U);
+
+// Flip one bit of s[byte]. The XOR is done on uint8_t so the result never goes
+// through an implementation-defined int -> char narrowing.
+void FlipBit(std::string& s, size_t byte, size_t bit) {
+  s[byte] = static_cast<char>(static_cast<uint8_t>(s[byte]) ^ (1U << bit));
+}
 
 TEST(Crc32cTest, RFC3720TestVectors) {
   // Test vectors from RFC 3720 (iSCSI), Appendix B.4.
@@ -141,11 +147,11 @@ TEST(Crc32cTest, SingleBitFlips) {
 
     for (size_t byte_idx = 0; byte_idx < buf.size(); ++byte_idx) {
       for (int bit = 0; bit < 8; ++bit) {
-        buf[byte_idx] ^= static_cast<char>(1 << bit);
+        FlipBit(buf, byte_idx, bit);
         const uint32_t flipped_crc = Value(buf.data(), buf.size());
         EXPECT_NE(flipped_crc, base_crc)
             << "CRC collision on bit flip at byte " << byte_idx << ", bit " << bit;
-        buf[byte_idx] ^= static_cast<char>(1 << bit);  // revert
+        FlipBit(buf, byte_idx, bit);  // revert
       }
     }
   };
@@ -172,13 +178,13 @@ TEST(Crc32cTest, TwoBitFlips) {
 
   const size_t total_bits = buf.size() * 8;
   for (size_t i = 0; i < total_bits; ++i) {
-    buf[i / 8] ^= static_cast<char>(1 << (i % 8));
+    FlipBit(buf, i / 8, i % 8);
     for (size_t j = i + 1; j < total_bits; ++j) {
-      buf[j / 8] ^= static_cast<char>(1 << (j % 8));
+      FlipBit(buf, j / 8, j % 8);
       EXPECT_NE(Value(buf), base_crc) << "Two-bit flip collision at bits " << i << " and " << j;
-      buf[j / 8] ^= static_cast<char>(1 << (j % 8));
+      FlipBit(buf, j / 8, j % 8);
     }
-    buf[i / 8] ^= static_cast<char>(1 << (i % 8));
+    FlipBit(buf, i / 8, i % 8);
   }
 }
 
@@ -242,9 +248,9 @@ TEST(Crc32cTest, SingleBitFlipsShortBuffers) {
     const uint32_t base_crc = Value(buf);
     for (size_t i = 0; i < len; ++i) {
       for (int bit = 0; bit < 8; ++bit) {
-        buf[i] ^= static_cast<char>(1 << bit);
+        FlipBit(buf, i, bit);
         EXPECT_NE(Value(buf), base_crc);
-        buf[i] ^= static_cast<char>(1 << bit);
+        FlipBit(buf, i, bit);
       }
     }
   }
@@ -308,7 +314,7 @@ TEST(Crc32cTest, WalRecordBitFlipReturnsCorruption) {
   for (size_t byte_idx = 0; byte_idx < record.size(); ++byte_idx) {
     for (int bit = 0; bit < 8; ++bit) {
       std::string corrupted = record;
-      corrupted[byte_idx] ^= static_cast<char>(1 << bit);
+      FlipBit(corrupted, byte_idx, bit);
       Status s = parse_and_verify(corrupted);
       EXPECT_TRUE(s.IsCorruption())
           << "Failed to detect corruption at byte " << byte_idx << ", bit " << bit;
@@ -350,7 +356,7 @@ TEST(Crc32cTest, SstableBlockTrailerBitFlipReturnsCorruption) {
   for (size_t byte_idx = 0; byte_idx < block.size(); ++byte_idx) {
     for (int bit = 0; bit < 8; ++bit) {
       std::string corrupted = block;
-      corrupted[byte_idx] ^= static_cast<char>(1 << bit);
+      FlipBit(corrupted, byte_idx, bit);
       Status s = parse_and_verify_block(corrupted);
       EXPECT_TRUE(s.IsCorruption())
           << "Failed to detect corruption at byte " << byte_idx << ", bit " << bit;
@@ -400,8 +406,8 @@ TEST(Crc32cTest, RawCrcSelfAppendIsConstantWhileMaskedVaries) {
 
 TEST(Crc32cTest, SpeedBenchmark) {
   // Benchmark byte-at-a-time table throughput over a 1 MB buffer.
-  constexpr size_t kBufferSize = 1024 * 1024;  // 1 MB
-  constexpr int kIterations = 64;              // 64 MB total
+  constexpr size_t kBufferSize = size_t{1024} * 1024;  // 1 MB
+  constexpr int kIterations = 64;                      // 64 MB total
   std::string buffer(kBufferSize, 'x');
 
   auto start = std::chrono::steady_clock::now();
