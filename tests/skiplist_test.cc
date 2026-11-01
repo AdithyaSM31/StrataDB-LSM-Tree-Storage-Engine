@@ -166,6 +166,11 @@ TEST(SkipListTest, SeekLandsOnLowerBound) {
 }
 
 #if STRATA_DEBUG_CHECKS
+TEST(SkipListTest, NullArenaAborts) {
+  EXPECT_DEATH((SkipList<uint64_t, Uint64Comparator>(Uint64Comparator{}, nullptr)),
+               "check failed:");
+}
+
 TEST(SkipListTest, DuplicateKeyAborts) {
   Arena arena;
   SkipList<uint64_t, Uint64Comparator> list(Uint64Comparator{}, &arena);
@@ -174,6 +179,19 @@ TEST(SkipListTest, DuplicateKeyAborts) {
   EXPECT_TRUE(list.Contains(100));
 
   EXPECT_DEATH(list.Insert(100), "check failed:");
+}
+
+TEST(SkipListTest, InvalidIteratorAccessAborts) {
+  Arena arena;
+  SkipList<uint64_t, Uint64Comparator> list(Uint64Comparator{}, &arena);
+  SkipList<uint64_t, Uint64Comparator>::Iterator iter(&list);
+
+  EXPECT_FALSE(iter.Valid());
+  EXPECT_DEATH(iter.key(), "check failed:");
+  EXPECT_DEATH(iter.Next(), "check failed:");
+  EXPECT_DEATH(iter.Prev(), "check failed:");
+
+  EXPECT_DEATH((SkipList<uint64_t, Uint64Comparator>::Iterator(nullptr)), "check failed:");
 }
 #endif
 
@@ -284,6 +302,109 @@ TEST(SkipListTest, CStringPointerComparator) {
 #endif
 }
 
+TEST(SkipListTest, SingleElementList) {
+  Arena arena;
+  SkipList<uint64_t, Uint64Comparator> list(Uint64Comparator{}, &arena);
+
+  list.Insert(42);
+  EXPECT_TRUE(list.Contains(42));
+  EXPECT_FALSE(list.Contains(41));
+  EXPECT_FALSE(list.Contains(43));
+
+  SkipList<uint64_t, Uint64Comparator>::Iterator iter(&list);
+
+  // SeekToFirst
+  iter.SeekToFirst();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 42U);
+  iter.Next();
+  EXPECT_FALSE(iter.Valid());
+
+  // SeekToFirst and Prev
+  iter.SeekToFirst();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 42U);
+  iter.Prev();
+  EXPECT_FALSE(iter.Valid());
+
+  // SeekToLast
+  iter.SeekToLast();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 42U);
+  iter.Prev();
+  EXPECT_FALSE(iter.Valid());
+
+  // SeekToLast and Next
+  iter.SeekToLast();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 42U);
+  iter.Next();
+  EXPECT_FALSE(iter.Valid());
+
+  // Seek
+  iter.Seek(0);
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 42U);
+
+  iter.Seek(42);
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 42U);
+
+  iter.Seek(43);
+  EXPECT_FALSE(iter.Valid());
+}
+
+TEST(SkipListTest, BoundaryKeys) {
+  Arena arena;
+  SkipList<uint64_t, Uint64Comparator> list(Uint64Comparator{}, &arena);
+
+  list.Insert(0);
+  list.Insert(100);
+  list.Insert(UINT64_MAX);
+
+  EXPECT_TRUE(list.Contains(0));
+  EXPECT_TRUE(list.Contains(100));
+  EXPECT_TRUE(list.Contains(UINT64_MAX));
+  EXPECT_FALSE(list.Contains(1));
+  EXPECT_FALSE(list.Contains(UINT64_MAX - 1));
+
+  SkipList<uint64_t, Uint64Comparator>::Iterator iter(&list);
+
+  iter.Seek(0);
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 0U);
+
+  iter.Seek(UINT64_MAX);
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), UINT64_MAX);
+
+  // Forward iterate: 0, 100, UINT64_MAX
+  iter.SeekToFirst();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 0U);
+  iter.Next();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 100U);
+  iter.Next();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), UINT64_MAX);
+  iter.Next();
+  EXPECT_FALSE(iter.Valid());
+
+  // Reverse iterate: UINT64_MAX, 100, 0
+  iter.SeekToLast();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), UINT64_MAX);
+  iter.Prev();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 100U);
+  iter.Prev();
+  ASSERT_TRUE(iter.Valid());
+  EXPECT_EQ(iter.key(), 0U);
+  iter.Prev();
+  EXPECT_FALSE(iter.Valid());
+}
+
 // ---------------------------------------------------------------------------
 // Concurrent Tests: One Writer, Four Readers
 // ---------------------------------------------------------------------------
@@ -321,10 +442,12 @@ TEST(SkipListTest, ConcurrentOneWriterFourReaders) {
   std::atomic<size_t> inserted_count{0};
   std::atomic<bool> start{false};
 
+  std::atomic<int> readers_ready{0};
   std::vector<std::thread> readers;
   readers.reserve(kNumReaders);
   for (int r = 0; r < kNumReaders; ++r) {
     readers.emplace_back([&]() {
+      readers_ready.fetch_add(1, std::memory_order_release);
       while (!start.load(std::memory_order_relaxed)) {
         std::this_thread::yield();
       }
@@ -374,6 +497,9 @@ TEST(SkipListTest, ConcurrentOneWriterFourReaders) {
   }
 
   std::thread writer([&]() {
+    while (readers_ready.load(std::memory_order_acquire) < kNumReaders) {
+      std::this_thread::yield();
+    }
     start.store(true, std::memory_order_relaxed);
     for (size_t i = 0; i < kNumKeys; ++i) {
       list.Insert(keys[i]);
@@ -406,12 +532,14 @@ TEST(SkipListTest, ConcurrentContainsAndSeek) {
   SkipList<uint64_t, Uint64Comparator> list(Uint64Comparator{}, &arena);
   std::atomic<size_t> inserted_count{0};
   std::atomic<bool> start{false};
+  std::atomic<int> readers_ready{0};
 
   std::vector<std::thread> readers;
   readers.reserve(kNumReaders);
   for (int r = 0; r < kNumReaders; ++r) {
     readers.emplace_back([&, r]() {
       Random reader_rnd(4242 + r);
+      readers_ready.fetch_add(1, std::memory_order_release);
       while (!start.load(std::memory_order_relaxed)) {
         std::this_thread::yield();
       }
@@ -419,15 +547,16 @@ TEST(SkipListTest, ConcurrentContainsAndSeek) {
       while (true) {
         size_t done = inserted_count.load(std::memory_order_acquire);
         if (done > 0) {
-          // Probe a random guaranteed key
-          size_t sample_idx = reader_rnd.Uniform(static_cast<uint32_t>(done));
-          uint64_t target = keys[sample_idx];
-          ASSERT_TRUE(list.Contains(target));
+          for (int probe = 0; probe < 10; ++probe) {
+            size_t sample_idx = reader_rnd.Uniform(static_cast<uint32_t>(done));
+            uint64_t target = keys[sample_idx];
+            ASSERT_TRUE(list.Contains(target));
 
-          SkipList<uint64_t, Uint64Comparator>::Iterator iter(&list);
-          iter.Seek(target);
-          ASSERT_TRUE(iter.Valid());
-          ASSERT_EQ(iter.key(), target);
+            SkipList<uint64_t, Uint64Comparator>::Iterator iter(&list);
+            iter.Seek(target);
+            ASSERT_TRUE(iter.Valid());
+            ASSERT_EQ(iter.key(), target);
+          }
 
           // An invalid key (bad checksum) should not be present
           uint64_t fake_key = (static_cast<uint64_t>(kNumKeys + 100) << 32) | 0xDEADBEEF;
@@ -442,6 +571,92 @@ TEST(SkipListTest, ConcurrentContainsAndSeek) {
   }
 
   std::thread writer([&]() {
+    while (readers_ready.load(std::memory_order_acquire) < kNumReaders) {
+      std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_relaxed);
+    for (size_t i = 0; i < kNumKeys; ++i) {
+      list.Insert(keys[i]);
+      inserted_count.store(i + 1, std::memory_order_release);
+    }
+  });
+
+  writer.join();
+  for (auto& reader : readers) {
+    reader.join();
+  }
+}
+
+TEST(SkipListTest, ConcurrentReverseIteration) {
+  constexpr size_t kNumKeys = 10000;
+  constexpr int kNumReaders = 4;
+
+  std::vector<uint64_t> keys(kNumKeys);
+  for (size_t i = 0; i < kNumKeys; ++i) {
+    keys[i] = MakeConcurrentKey(static_cast<uint32_t>(i));
+  }
+
+  Random rnd(9999);
+  for (size_t i = kNumKeys - 1; i > 0; --i) {
+    size_t j = rnd.Uniform(static_cast<uint32_t>(i + 1));
+    std::swap(keys[i], keys[j]);
+  }
+
+  Arena arena;
+  SkipList<uint64_t, Uint64Comparator> list(Uint64Comparator{}, &arena);
+  std::atomic<size_t> inserted_count{0};
+  std::atomic<bool> start{false};
+  std::atomic<int> readers_ready{0};
+
+  std::vector<std::thread> readers;
+  readers.reserve(kNumReaders);
+  for (int r = 0; r < kNumReaders; ++r) {
+    readers.emplace_back([&]() {
+      readers_ready.fetch_add(1, std::memory_order_release);
+      while (!start.load(std::memory_order_relaxed)) {
+        std::this_thread::yield();
+      }
+
+      while (true) {
+        size_t done = inserted_count.load(std::memory_order_acquire);
+
+        SkipList<uint64_t, Uint64Comparator>::Iterator iter(&list);
+        iter.SeekToLast();
+        uint64_t prev = UINT64_MAX;
+        bool first = true;
+        size_t reverse_observed = 0;
+
+        while (iter.Valid()) {
+          uint64_t k = iter.key();
+          // 1. Checksum must be valid (no torn/garbage reads)
+          ASSERT_TRUE(ChecksumValid(k));
+          // 2. Keys must be strictly decreasing
+          if (!first) {
+            ASSERT_LT(k, prev);
+          }
+          first = false;
+          prev = k;
+          ++reverse_observed;
+
+          iter.Prev();
+        }
+
+        if (done > 0) {
+          ASSERT_GT(reverse_observed, 0U);
+        }
+
+        if (done >= kNumKeys) {
+          ASSERT_EQ(reverse_observed, kNumKeys);
+          break;
+        }
+      }
+    });
+  }
+
+  std::thread writer([&]() {
+    while (readers_ready.load(std::memory_order_acquire) < kNumReaders) {
+      std::this_thread::yield();
+    }
     start.store(true, std::memory_order_relaxed);
     for (size_t i = 0; i < kNumKeys; ++i) {
       list.Insert(keys[i]);

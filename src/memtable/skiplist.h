@@ -109,21 +109,25 @@ class SkipList {
 
     Node* Next(int n) const {
       STRATA_DCHECK(n >= 0);
+      STRATA_DCHECK(n < kMaxHeight);
       return next_[n].load(std::memory_order_acquire);
     }
 
     void SetNext(int n, Node* x) {
       STRATA_DCHECK(n >= 0);
+      STRATA_DCHECK(n < kMaxHeight);
       next_[n].store(x, std::memory_order_release);
     }
 
     Node* NoBarrier_Next(int n) const {
       STRATA_DCHECK(n >= 0);
+      STRATA_DCHECK(n < kMaxHeight);
       return next_[n].load(std::memory_order_relaxed);
     }
 
     void NoBarrier_SetNext(int n, Node* x) {
       STRATA_DCHECK(n >= 0);
+      STRATA_DCHECK(n < kMaxHeight);
       next_[n].store(x, std::memory_order_relaxed);
     }
 
@@ -132,6 +136,11 @@ class SkipList {
     // Really `height` entries allocated past the end of the struct.
     std::atomic<Node*> next_[1];
   };
+
+  static Arena* CheckNotNull(Arena* arena) {
+    STRATA_DCHECK(arena != nullptr);
+    return arena;
+  }
 
   Node* NewNode(const Key& key, int height);
   int RandomHeight();
@@ -165,11 +174,10 @@ class SkipList {
 template <typename Key, class Comparator>
 SkipList<Key, Comparator>::SkipList(Comparator cmp, Arena* arena)
     : compare_(cmp),
-      arena_(arena),
+      arena_(CheckNotNull(arena)),
       head_(NewNode(Key{}, kMaxHeight)),
       max_height_(1),
       rnd_(0xdeadbeef) {
-  STRATA_DCHECK(arena_ != nullptr);
   for (int i = 0; i < kMaxHeight; ++i) {
     head_->SetNext(i, nullptr);
   }
@@ -178,6 +186,7 @@ SkipList<Key, Comparator>::SkipList(Comparator cmp, Arena* arena)
 template <typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node* SkipList<Key, Comparator>::NewNode(const Key& key,
                                                                              int height) {
+  STRATA_DCHECK(arena_ != nullptr);
   STRATA_DCHECK(height >= 1);
   STRATA_DCHECK(height <= kMaxHeight);
   char* const mem =
