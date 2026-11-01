@@ -1,0 +1,6 @@
+# Google style, the same base LevelDB uses, with a wider line.
+BasedOnStyle: Google
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Regroup

@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format
+        run: |
+          files=$(git ls-files '*.h' '*.cc')
+          [ -z "$files" ] || clang-format --dry-run --Werror $files
+
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "ASan + UBSan (gcc)", preset: asan,    cxx: g++ }
+          - { name: "TSan (gcc)",         preset: tsan,    cxx: g++ }
+          - { name: "Release (gcc)",      preset: release, cxx: g++ }
+          - { name: "Release (clang)",    preset: release, cxx: clang++ }
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      # Ubuntu 24.04 runners use high ASLR entropy, which makes TSan abort
+      # with "unexpected memory mapping". Lower it for this job.
+      - name: Lower ASLR entropy for TSan
+        if: matrix.preset == 'tsan'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}

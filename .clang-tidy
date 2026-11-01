@@ -1,0 +1,16 @@
+# Enable with: cmake --preset debug -DSTRATA_CLANG_TIDY=ON
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  concurrency-*,
+  performance-*,
+  modernize-use-override,
+  modernize-use-nullptr,
+  modernize-use-using,
+  readability-braces-around-statements,
+  readability-implicit-bool-conversion,
+  misc-unused-using-decls
+WarningsAsErrors: ''
+HeaderFilterRegex: '(include/strata|src|tests|tools|bench)/.*'
+FormatStyle: file
