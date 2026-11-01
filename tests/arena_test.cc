@@ -105,6 +105,42 @@ TEST(ArenaTest, LargeRequestRule) {
   EXPECT_EQ(p2, p1 + 128);
 }
 
+TEST(ArenaTest, LargeAlignedAllocations) {
+  // Check that large AllocateAligned requests (> 1024 bytes) also satisfy 8-byte alignment.
+  Arena arena;
+  constexpr size_t kAlign = 8;
+  const size_t large_sizes[] = {1025, 2048, 4096, 8192, 16384};
+
+  for (size_t sz : large_sizes) {
+    char* p = arena.AllocateAligned(sz);
+    ASSERT_NE(p, nullptr);
+    uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+    EXPECT_EQ(addr % kAlign, 0U) << "Unaligned address for large size " << sz;
+  }
+}
+
+TEST(ArenaTest, LargeAlignedRequestPreservesCurrentBlock) {
+  Arena arena;
+  constexpr size_t kAlign = 8;
+
+  char* p1 = arena.AllocateAligned(128);
+  ASSERT_NE(p1, nullptr);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(p1) % kAlign, 0U);
+
+  // Large aligned allocation (> 1024) must receive its own block.
+  char* p_large = arena.AllocateAligned(2048);
+  ASSERT_NE(p_large, nullptr);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(p_large) % kAlign, 0U);
+  EXPECT_NE(p_large, p1 + 128);
+
+  // Second small aligned allocation must be fulfilled from the original 4 KB block
+  // directly adjacent to p1.
+  char* p2 = arena.AllocateAligned(64);
+  ASSERT_NE(p2, nullptr);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(p2) % kAlign, 0U);
+  EXPECT_EQ(p2, p1 + 128);
+}
+
 TEST(ArenaTest, LargeRequestThresholdBoundary) {
   Arena arena;
 
