@@ -18,8 +18,7 @@ class [[nodiscard]] Status {
     kIOError = 5,
   };
 
-  Status() noexcept : code_(Code::kOk) {}
-  Status(Code code, std::string_view msg, std::string_view msg2 = {});
+  Status() noexcept = default;
 
   static Status OK() { return Status(); }
   static Status NotFound(std::string_view msg, std::string_view msg2 = {}) {
@@ -51,6 +50,8 @@ class [[nodiscard]] Status {
   std::string ToString() const;
 
  private:
+  Status(Code code, std::string_view msg, std::string_view msg2 = {});
+
   Code code_ = Code::kOk;
   std::string message_;
 };

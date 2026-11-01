@@ -204,6 +204,82 @@ TEST(CodingTest, TooLongVarint) {
   EXPECT_FALSE(GetVarint64(&sv64, &v64));
 }
 
+TEST(CodingTest, Varint32Overflow) {
+  // A 5-byte varint with bits set in bits 4..6 of the 5th byte (0xF0 mask)
+  // would overflow a 32-bit integer (shift is 28, so bits 4..6 represent bits 32..34).
+  uint32_t val = 0;
+
+  // 4 bytes with MSB set followed by 0x10 (bit 4 set)
+  const char bad1[5] = {static_cast<char>(0x80), static_cast<char>(0x80), static_cast<char>(0x80),
+                        static_cast<char>(0x80), 0x10};
+  EXPECT_EQ(GetVarint32Ptr(bad1, bad1 + 5, &val), nullptr);
+  std::string_view sv1(bad1, 5);
+  EXPECT_FALSE(GetVarint32(&sv1, &val));
+
+  // 4 bytes 0xFF followed by 0x10
+  const char bad2[5] = {static_cast<char>(0xFF), static_cast<char>(0xFF), static_cast<char>(0xFF),
+                        static_cast<char>(0xFF), 0x10};
+  EXPECT_EQ(GetVarint32Ptr(bad2, bad2 + 5, &val), nullptr);
+  std::string_view sv2(bad2, 5);
+  EXPECT_FALSE(GetVarint32(&sv2, &val));
+
+  // 4 bytes 0xFF followed by 0x7F (maximum 7-bit value in last byte)
+  const char bad3[5] = {static_cast<char>(0xFF), static_cast<char>(0xFF), static_cast<char>(0xFF),
+                        static_cast<char>(0xFF), 0x7F};
+  EXPECT_EQ(GetVarint32Ptr(bad3, bad3 + 5, &val), nullptr);
+  std::string_view sv3(bad3, 5);
+  EXPECT_FALSE(GetVarint32(&sv3, &val));
+
+  // Valid maximum 32-bit varint: 4 bytes 0xFF followed by 0x0F
+  const char good[5] = {static_cast<char>(0xFF), static_cast<char>(0xFF), static_cast<char>(0xFF),
+                        static_cast<char>(0xFF), 0x0F};
+  EXPECT_EQ(GetVarint32Ptr(good, good + 5, &val), good + 5);
+  EXPECT_EQ(val, 0xFFFFFFFFU);
+  std::string_view sv_good(good, 5);
+  EXPECT_TRUE(GetVarint32(&sv_good, &val));
+  EXPECT_EQ(val, 0xFFFFFFFFU);
+}
+
+TEST(CodingTest, Varint64Overflow) {
+  // A 10-byte varint with bits set in bits 1..6 of the 10th byte (0xFE mask)
+  // would overflow a 64-bit integer (shift is 63, so bits 1..6 represent bits 64..69).
+  uint64_t val = 0;
+
+  // 9 bytes with MSB set followed by 0x02 (bit 1 set)
+  char bad1[10];
+  for (int i = 0; i < 9; ++i) bad1[i] = static_cast<char>(0x80);
+  bad1[9] = 0x02;
+  EXPECT_EQ(GetVarint64Ptr(bad1, bad1 + 10, &val), nullptr);
+  std::string_view sv1(bad1, 10);
+  EXPECT_FALSE(GetVarint64(&sv1, &val));
+
+  // 9 bytes 0xFF followed by 0x02
+  char bad2[10];
+  for (int i = 0; i < 9; ++i) bad2[i] = static_cast<char>(0xFF);
+  bad2[9] = 0x02;
+  EXPECT_EQ(GetVarint64Ptr(bad2, bad2 + 10, &val), nullptr);
+  std::string_view sv2(bad2, 10);
+  EXPECT_FALSE(GetVarint64(&sv2, &val));
+
+  // 9 bytes 0xFF followed by 0x7F
+  char bad3[10];
+  for (int i = 0; i < 9; ++i) bad3[i] = static_cast<char>(0xFF);
+  bad3[9] = 0x7F;
+  EXPECT_EQ(GetVarint64Ptr(bad3, bad3 + 10, &val), nullptr);
+  std::string_view sv3(bad3, 10);
+  EXPECT_FALSE(GetVarint64(&sv3, &val));
+
+  // Valid maximum 64-bit varint: 9 bytes 0xFF followed by 0x01
+  char good[10];
+  for (int i = 0; i < 9; ++i) good[i] = static_cast<char>(0xFF);
+  good[9] = 0x01;
+  EXPECT_EQ(GetVarint64Ptr(good, good + 10, &val), good + 10);
+  EXPECT_EQ(val, 0xFFFFFFFFFFFFFFFFULL);
+  std::string_view sv_good(good, 10);
+  EXPECT_TRUE(GetVarint64(&sv_good, &val));
+  EXPECT_EQ(val, 0xFFFFFFFFFFFFFFFFULL);
+}
+
 TEST(CodingTest, LengthPrefixed) {
   std::string s;
   PutLengthPrefixed(&s, "");
