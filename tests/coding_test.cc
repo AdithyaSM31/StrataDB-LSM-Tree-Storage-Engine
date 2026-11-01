@@ -66,8 +66,12 @@ TEST(CodingTest, Varint32RoundTripAndLength) {
   for (int i = 0; i < 32; ++i) {
     uint32_t p = 1U << i;
     values.push_back(p);
-    if (p > 0) values.push_back(p - 1);
-    if (p < 0xFFFFFFFFU) values.push_back(p + 1);
+    if (p > 0) {
+      values.push_back(p - 1);
+    }
+    if (p < 0xFFFFFFFFU) {
+      values.push_back(p + 1);
+    }
   }
 
   for (uint32_t val : values) {
@@ -95,8 +99,12 @@ TEST(CodingTest, Varint64RoundTripAndLength) {
   for (int i = 0; i < 64; ++i) {
     uint64_t p = 1ULL << i;
     values.push_back(p);
-    if (p > 0) values.push_back(p - 1);
-    if (p < 0xFFFFFFFFFFFFFFFFULL) values.push_back(p + 1);
+    if (p > 0) {
+      values.push_back(p - 1);
+    }
+    if (p < 0xFFFFFFFFFFFFFFFFULL) {
+      values.push_back(p + 1);
+    }
   }
 
   for (uint64_t val : values) {
@@ -126,7 +134,7 @@ TEST(CodingTest, ManyValuesInARow) {
 
   for (uint32_t i = 0; i < 1000; ++i) {
     uint32_t v32 = (i * 1000003U) ^ (i << 13);
-    uint64_t v64 = (static_cast<uint64_t>(v32) << 32) | (i * 37U);
+    uint64_t v64 = (static_cast<uint64_t>(v32) << 32) | (static_cast<uint64_t>(i) * 37U);
     expected32.push_back(v32);
     expected64.push_back(v64);
     PutVarint32(&s, v32);
@@ -189,7 +197,9 @@ TEST(CodingTest, TruncationVarint64) {
 TEST(CodingTest, TooLongVarint) {
   // 6 bytes of 0x80 must fail to decode as a 32-bit varint
   char bad32[6];
-  for (int i = 0; i < 6; ++i) bad32[i] = static_cast<char>(0x80);
+  for (int i = 0; i < 6; ++i) {
+    bad32[i] = static_cast<char>(0x80);
+  }
   uint32_t v32 = 0;
   EXPECT_EQ(GetVarint32Ptr(bad32, bad32 + 6, &v32), nullptr);
   std::string_view sv32(bad32, 6);
@@ -197,7 +207,9 @@ TEST(CodingTest, TooLongVarint) {
 
   // 11 bytes of 0x80 must fail to decode as a 64-bit varint
   char bad64[11];
-  for (int i = 0; i < 11; ++i) bad64[i] = static_cast<char>(0x80);
+  for (int i = 0; i < 11; ++i) {
+    bad64[i] = static_cast<char>(0x80);
+  }
   uint64_t v64 = 0;
   EXPECT_EQ(GetVarint64Ptr(bad64, bad64 + 11, &v64), nullptr);
   std::string_view sv64(bad64, 11);
@@ -222,6 +234,7 @@ TEST(CodingTest, Varint32Overflow) {
   EXPECT_EQ(GetVarint32Ptr(bad2, bad2 + 5, &val), nullptr);
   std::string_view sv2(bad2, 5);
   EXPECT_FALSE(GetVarint32(&sv2, &val));
+  EXPECT_EQ(sv2.size(), 5U) << "a failed decode must not consume input";
 
   // 4 bytes 0xFF followed by 0x7F (maximum 7-bit value in last byte)
   const char bad3[5] = {static_cast<char>(0xFF), static_cast<char>(0xFF), static_cast<char>(0xFF),
@@ -247,7 +260,9 @@ TEST(CodingTest, Varint64Overflow) {
 
   // 9 bytes with MSB set followed by 0x02 (bit 1 set)
   char bad1[10];
-  for (int i = 0; i < 9; ++i) bad1[i] = static_cast<char>(0x80);
+  for (int i = 0; i < 9; ++i) {
+    bad1[i] = static_cast<char>(0x80);
+  }
   bad1[9] = 0x02;
   EXPECT_EQ(GetVarint64Ptr(bad1, bad1 + 10, &val), nullptr);
   std::string_view sv1(bad1, 10);
@@ -255,15 +270,20 @@ TEST(CodingTest, Varint64Overflow) {
 
   // 9 bytes 0xFF followed by 0x02
   char bad2[10];
-  for (int i = 0; i < 9; ++i) bad2[i] = static_cast<char>(0xFF);
+  for (int i = 0; i < 9; ++i) {
+    bad2[i] = static_cast<char>(0xFF);
+  }
   bad2[9] = 0x02;
   EXPECT_EQ(GetVarint64Ptr(bad2, bad2 + 10, &val), nullptr);
   std::string_view sv2(bad2, 10);
   EXPECT_FALSE(GetVarint64(&sv2, &val));
+  EXPECT_EQ(sv2.size(), 10U) << "a failed decode must not consume input";
 
   // 9 bytes 0xFF followed by 0x7F
   char bad3[10];
-  for (int i = 0; i < 9; ++i) bad3[i] = static_cast<char>(0xFF);
+  for (int i = 0; i < 9; ++i) {
+    bad3[i] = static_cast<char>(0xFF);
+  }
   bad3[9] = 0x7F;
   EXPECT_EQ(GetVarint64Ptr(bad3, bad3 + 10, &val), nullptr);
   std::string_view sv3(bad3, 10);
@@ -271,7 +291,9 @@ TEST(CodingTest, Varint64Overflow) {
 
   // Valid maximum 64-bit varint: 9 bytes 0xFF followed by 0x01
   char good[10];
-  for (int i = 0; i < 9; ++i) good[i] = static_cast<char>(0xFF);
+  for (int i = 0; i < 9; ++i) {
+    good[i] = static_cast<char>(0xFF);
+  }
   good[9] = 0x01;
   EXPECT_EQ(GetVarint64Ptr(good, good + 10, &val), good + 10);
   EXPECT_EQ(val, 0xFFFFFFFFFFFFFFFFULL);

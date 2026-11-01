@@ -16,11 +16,8 @@ Status::Status(Code code, std::string_view msg, std::string_view msg2) : code_(c
 }
 
 std::string Status::ToString() const {
-  if (code_ == Code::kOk) {
-    return "OK";
-  }
-
-  const char* type = nullptr;
+  // Never left as nullptr: building a std::string from nullptr is undefined.
+  const char* type = "Unknown code";
   switch (code_) {
     case Code::kOk:
       return "OK";

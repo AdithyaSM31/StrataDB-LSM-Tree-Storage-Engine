@@ -3,10 +3,21 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace strata {
 namespace {
+
+// Only the factories may build a Status, so "OK with a message" and
+// out-of-range codes cannot be expressed.
+static_assert(!std::is_constructible_v<Status, Status::Code, std::string_view, std::string_view>);
+static_assert(!std::is_constructible_v<Status, Status::Code, std::string_view>);
+
+// message() hands out a reference to the Status's own string.
+static_assert(
+    std::is_same_v<decltype(std::declval<const Status&>().message()), const std::string&>);
 
 TEST(StatusTest, DefaultIsOK) {
   Status s;

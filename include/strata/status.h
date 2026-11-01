@@ -45,11 +45,14 @@ class [[nodiscard]] Status {
   bool IsIOError() const { return code_ == Code::kIOError; }
 
   Code code() const { return code_; }
-  std::string_view message() const { return message_; }
+  // Returned by reference, so it stays valid only while this Status is alive.
+  const std::string& message() const { return message_; }
 
   std::string ToString() const;
 
  private:
+  // Private so every Status comes from a factory: no "OK with a message" and
+  // no out-of-range codes.
   Status(Code code, std::string_view msg, std::string_view msg2 = {});
 
   Code code_ = Code::kOk;
