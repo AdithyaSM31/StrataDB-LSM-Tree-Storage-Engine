@@ -14,9 +14,10 @@ namespace strata {
 //    is unspecified.
 // 2. std::mt19937 is deterministic, but std::uniform_int_distribution's
 //    algorithm is NOT specified by the C++ standard (libstdc++ and libc++ yield
-//    different streams for the exact same seed). In a storage engine, deterministic
-//    simulation tests (--seed=N) and SSTable Bloom filters must reproduce identically
-//    on any OS, compiler, or architecture. Furthermore, mt19937 carries 2.5 KB of
+//    different streams for the exact same seed). Deterministic simulation tests
+//    (--seed=N) and skiplist tests must replay identically on any OS, compiler, or
+//    architecture, so a failing seed from CI reproduces locally. (Bloom filters
+//    depend on Hash, not on this generator.) Furthermore, mt19937 carries 2.5 KB of
 //    state, which is unnecessarily heavy for skiplist node allocation.
 //
 // SplitMix64 has a 64-bit state, passes BigCrush, and all 64-bit seeds are valid

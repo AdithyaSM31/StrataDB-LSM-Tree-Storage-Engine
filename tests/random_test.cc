@@ -108,7 +108,7 @@ TEST(RandomTest, OneInDistribution) {
     }
   }
 
-  // 25,000 expected. Allow ±3% of total trials (±3,000).
+  // 25,000 expected. Allow ±1% of total trials (±1,000).
   EXPECT_GE(true_count, 24000);
   EXPECT_LE(true_count, 26000);
 
@@ -138,9 +138,15 @@ TEST(RandomTest, SkiplistHeightSimulation) {
     while (height < kMaxHeight && rnd.OneIn(4)) {
       ++height;
     }
-    if (height >= 2) ++ge2;
-    if (height >= 3) ++ge3;
-    if (height >= 4) ++ge4;
+    if (height >= 2) {
+      ++ge2;
+    }
+    if (height >= 3) {
+      ++ge3;
+    }
+    if (height >= 4) {
+      ++ge4;
+    }
   }
 
   // Expected ge2: ~25000 (allow ±1000)

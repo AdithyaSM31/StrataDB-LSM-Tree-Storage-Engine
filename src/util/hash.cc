@@ -19,7 +19,10 @@ uint32_t Hash(const char* data, size_t n, uint32_t seed) {
   STRATA_DCHECK(data != nullptr);
 
   const char* limit = data + n;
-  while (data + 4 <= limit) {
+  // Compare the remaining length, not `data + 4 <= limit`: forming a pointer
+  // more than one past the end of the buffer is undefined behaviour even if
+  // it is never dereferenced.
+  while (limit - data >= 4) {
     uint32_t w = DecodeFixed32(data);
     data += 4;
     h += w;
