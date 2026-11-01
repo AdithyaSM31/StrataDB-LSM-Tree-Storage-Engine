@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "util/random.h"
@@ -19,15 +20,21 @@
 namespace strata {
 namespace {
 
+// Wrappers take ownership only through std::unique_ptr, never a raw pointer.
+static_assert(!std::is_constructible_v<WritableFileWrapper, WritableFile*>);
+static_assert(!std::is_constructible_v<SequentialFileWrapper, SequentialFile*>);
+static_assert(!std::is_constructible_v<RandomAccessFileWrapper, RandomAccessFile*>);
+
 class EnvTest : public ::testing::Test {
  protected:
   void SetUp() override {
     env_ = Env::Default();
     static std::atomic<uint64_t> test_counter{0};
-    test_dir_ = (std::filesystem::temp_directory_path() /
-                 ("stratadb_env_test_" + std::to_string(env_->NowMicros()) + "_" +
-                  std::to_string(test_counter.fetch_add(1))))
-                    .string();
+    test_dir_ =
+        (std::filesystem::temp_directory_path() /
+         ("stratadb_env_test_" + std::to_string(::getpid()) + "_" +
+          std::to_string(env_->NowMicros()) + "_" + std::to_string(test_counter.fetch_add(1))))
+            .string();
     std::error_code ec;
     std::filesystem::create_directories(test_dir_, ec);
     ASSERT_FALSE(ec) << ec.message();
@@ -54,7 +61,7 @@ TEST_F(EnvTest, DefaultEnvSingleton) {
 }
 
 TEST_F(EnvTest, RoundTripWriteAndRead) {
-  constexpr size_t kTotalBytes = 1024 * 1024;  // 1 MB
+  constexpr size_t kTotalBytes = size_t{1024} * 1024;  // 1 MB
   std::string data;
   data.reserve(kTotalBytes);
   Random rnd(1337);
@@ -339,7 +346,7 @@ TEST_F(EnvTest, SyncDir) {
 }
 
 TEST_F(EnvTest, ConcurrentReads) {
-  constexpr size_t kFileSize = 512 * 1024;  // 512 KB
+  constexpr size_t kFileSize = size_t{512} * 1024;  // 512 KB
   std::string data;
   data.reserve(kFileSize);
   Random rnd(999);
@@ -600,8 +607,11 @@ TEST_F(EnvTest, FsyncgateStickyErrorOnDiskFull) {
   EXPECT_FALSE(close_status.ok());
   EXPECT_TRUE(close_status.IsIOError());
 
-  // Repeated close is idempotent OK.
-  EXPECT_TRUE(w->Close().ok());
+  // A repeated Close keeps reporting the failure: once a file has failed it
+  // must never look healthy again, even to cleanup code that closes twice.
+  Status second_close = w->Close();
+  EXPECT_TRUE(second_close.IsIOError());
+  EXPECT_EQ(second_close.ToString(), close_status.ToString());
 }
 
 TEST_F(EnvTest, ReadBoundaryAndNullScratchValidation) {

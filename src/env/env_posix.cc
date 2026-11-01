@@ -6,6 +6,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -253,7 +255,9 @@ class PosixWritableFile : public WritableFile {
 
   Status Close() override {
     if (closed_) {
-      return Status::OK();
+      // Repeat the first Close's outcome: once this file has failed it keeps
+      // failing (fsyncgate), so cleanup code that closes twice still sees it.
+      return status_;
     }
     closed_ = true;
     Status s = status_;
@@ -284,6 +288,11 @@ class PosixWritableFile : public WritableFile {
           continue;
         }
         status_ = PosixError(filename_, err);
+        return status_;
+      }
+      if (r == 0) {
+        // No progress on a non-empty write; fail rather than spin forever.
+        status_ = Status::IOError(filename_, "write returned 0 bytes");
         return status_;
       }
       data += r;
@@ -486,7 +495,7 @@ Status PosixEnv::GetFileSize(const std::string& fname, uint64_t* size) {
 Status PosixEnv::RenameFile(const std::string& src, const std::string& target) {
   if (::rename(src.c_str(), target.c_str()) != 0) {
     const int err = errno;
-    return PosixError(src, err);
+    return PosixError(src + " -> " + target, err);
   }
   return Status::OK();
 }

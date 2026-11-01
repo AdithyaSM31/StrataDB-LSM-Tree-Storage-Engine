@@ -202,11 +202,14 @@ class EnvWrapper : public Env {
 };
 
 // Wrapper classes forwarding to underlying file implementations.
+//
+// Each wrapper owns its target, and only accepts it as a std::unique_ptr so the
+// transfer of ownership is visible at the call site. (A raw-pointer constructor
+// would silently take ownership and double-free a pointer the caller still owns.)
 class SequentialFileWrapper : public SequentialFile {
  public:
   explicit SequentialFileWrapper(std::unique_ptr<SequentialFile> target)
       : target_(std::move(target)) {}
-  explicit SequentialFileWrapper(SequentialFile* target) : target_(target) {}
   ~SequentialFileWrapper() override = default;
 
   SequentialFile* target() const { return target_.get(); }
@@ -224,7 +227,6 @@ class RandomAccessFileWrapper : public RandomAccessFile {
  public:
   explicit RandomAccessFileWrapper(std::unique_ptr<RandomAccessFile> target)
       : target_(std::move(target)) {}
-  explicit RandomAccessFileWrapper(RandomAccessFile* target) : target_(target) {}
   ~RandomAccessFileWrapper() override = default;
 
   RandomAccessFile* target() const { return target_.get(); }
@@ -240,7 +242,6 @@ class RandomAccessFileWrapper : public RandomAccessFile {
 class WritableFileWrapper : public WritableFile {
  public:
   explicit WritableFileWrapper(std::unique_ptr<WritableFile> target) : target_(std::move(target)) {}
-  explicit WritableFileWrapper(WritableFile* target) : target_(target) {}
   ~WritableFileWrapper() override = default;
 
   WritableFile* target() const { return target_.get(); }
