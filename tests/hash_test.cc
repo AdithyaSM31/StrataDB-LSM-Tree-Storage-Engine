@@ -80,14 +80,36 @@ TEST(HashTest, SignedCharHandling) {
   const char high2[2] = {static_cast<char>(0xFF), static_cast<char>(0xFE)};
   const char high3[3] = {static_cast<char>(0xFF), static_cast<char>(0xFE), static_cast<char>(0xFD)};
 
-  uint32_t h1 = Hash(high1, 1, 0);
-  uint32_t h2 = Hash(high2, 2, 0);
-  uint32_t h3 = Hash(high3, 3, 0);
+  const unsigned char u_high1[1] = {0xFF};
+  const unsigned char u_high2[2] = {0xFF, 0xFE};
+  const unsigned char u_high3[3] = {0xFF, 0xFE, 0xFD};
 
-  // Ensure these run and produce non-trivial values.
-  EXPECT_NE(h1, 0U);
-  EXPECT_NE(h2, 0U);
-  EXPECT_NE(h3, 0U);
+  // 1. Signed buffer must yield exact same hash as unsigned buffer.
+  EXPECT_EQ(Hash(high1, 1, 0), Hash(reinterpret_cast<const char*>(u_high1), 1, 0));
+  EXPECT_EQ(Hash(high2, 2, 0), Hash(reinterpret_cast<const char*>(u_high2), 2, 0));
+  EXPECT_EQ(Hash(high3, 3, 0), Hash(reinterpret_cast<const char*>(u_high3), 3, 0));
+
+  // 2. Exact golden constants locked forever.
+  EXPECT_EQ(Hash(high1, 1, 0), 0x640c09b2U);
+  EXPECT_EQ(Hash(high2, 2, 0), 0x48590277U);
+  EXPECT_EQ(Hash(high3, 3, 0), 0x6aa920c2U);
+
+  // 3. Test lengths 5, 6, 7 to exercise 4-byte loop combined with leftover high bytes.
+  const char high5[5] = {static_cast<char>(0x80), static_cast<char>(0x90), static_cast<char>(0xA0),
+                         static_cast<char>(0xB0), static_cast<char>(0xC0)};
+  const unsigned char u_high5[5] = {0x80, 0x90, 0xA0, 0xB0, 0xC0};
+  EXPECT_EQ(Hash(high5, 5, 0), Hash(reinterpret_cast<const char*>(u_high5), 5, 0));
+}
+
+TEST(HashTest, NullDataHandling) {
+  // Null pointer with length 0 is safe and returns seed.
+  EXPECT_EQ(Hash(nullptr, 0, 0), 0U);
+  EXPECT_EQ(Hash(nullptr, 0, 42), 42U);
+
+#if STRATA_DEBUG_CHECKS
+  // Non-zero length with nullptr must abort.
+  EXPECT_DEATH(Hash(nullptr, 1, 0), "check failed: data != nullptr");
+#endif
 }
 
 TEST(HashTest, ShardDistribution) {
