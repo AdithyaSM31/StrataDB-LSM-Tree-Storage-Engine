@@ -27,7 +27,7 @@ namespace strata {
 // skiplist) must own its own instance.
 class Random {
  public:
-  explicit Random(uint64_t seed = 0xdeadbeefULL) : state_(seed) {}
+  explicit Random(uint64_t seed) : state_(seed) {}
 
   // Advances the generator state and returns a 64-bit pseudo-random value.
   uint64_t Next() {

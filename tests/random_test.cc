@@ -172,6 +172,11 @@ TEST(RandomTest, SkewedDistribution) {
     }
   }
 
+  // Boundary max_log = 31 must work without undefined behavior or overflow.
+  for (int i = 0; i < 200; ++i) {
+    EXPECT_LT(rnd.Skewed(31), 0x80000000U);
+  }
+
   // Check skewed property: in Skewed(10), values should be heavily concentrated
   // at the lower end.
   // With max_log = 10, range is [0, 1024). Half the choices of b are <= 5 (values < 32).
@@ -185,6 +190,16 @@ TEST(RandomTest, SkewedDistribution) {
   // At least 60% of values should be < 64 despite upper range reaching 1023.
   EXPECT_GT(small_count, 6000);
 }
+
+#if STRATA_DEBUG_CHECKS
+TEST(RandomTest, InvalidArgumentsAbort) {
+  Random rnd(1234);
+  EXPECT_DEATH(rnd.Uniform(0), "check failed: n > 0");
+  EXPECT_DEATH(rnd.OneIn(0), "check failed: n > 0");
+  EXPECT_DEATH(rnd.Skewed(-1), "check failed: max_log >= 0");
+  EXPECT_DEATH(rnd.Skewed(32), "check failed: max_log <= 31");
+}
+#endif
 
 }  // namespace
 }  // namespace strata
