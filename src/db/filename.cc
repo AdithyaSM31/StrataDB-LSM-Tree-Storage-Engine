@@ -86,7 +86,7 @@ bool ParseFileName(std::string_view name, uint64_t* number, FileType* type) {
   FileType parsed_type;
   if (ext == ".log") {
     parsed_type = FileType::kLogFile;
-  } else if (ext == ".sst") {
+  } else if (ext == ".sst" || ext == ".ldb") {
     parsed_type = FileType::kTableFile;
   } else if (ext == ".dbtmp") {
     parsed_type = FileType::kTempFile;

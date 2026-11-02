@@ -62,8 +62,6 @@ DBImpl::~DBImpl() {
 }
 
 Status DBImpl::Recover() {
-  // PosixEnv::CreateDir returns an error if the directory already exists.
-  // We treat that as fine, then apply create_if_missing and error_if_exists.
   const bool dir_exists = env_->FileExists(dbname_);
   if (!dir_exists) {
     if (!options_.create_if_missing) {
@@ -74,9 +72,8 @@ Status DBImpl::Recover() {
       return s;
     }
   } else {
-    if (options_.error_if_exists) {
-      return Status::InvalidArgument(dbname_, "exists (error_if_exists is true)");
-    }
+    // PosixEnv::CreateDir returns an error if the directory already exists.
+    // In Week 1, treat that as fine and proceed to evaluate DB existence.
   }
 
   // Acquire exclusive file lock on LockFileName(dbname_)
@@ -103,9 +100,25 @@ Status DBImpl::Recover() {
     }
   }
 
+  // Check create_if_missing and error_if_exists based on database existence.
+  // In Week 1 (before MANIFEST/CURRENT in Week 2), a database exists iff .log files exist.
+  if (logs.empty()) {
+    if (!options_.create_if_missing) {
+      return Status::InvalidArgument(dbname_, "does not exist (create_if_missing is false)");
+    }
+  } else {
+    if (options_.error_if_exists) {
+      return Status::InvalidArgument(dbname_, "exists (error_if_exists is true)");
+    }
+  }
+
   // Sort them numerically. GetChildren returns names in no particular order,
   // and replaying out of order would apply old writes on top of new ones.
   std::sort(logs.begin(), logs.end());
+
+  if (!logs.empty() && logs.back() == std::numeric_limits<uint64_t>::max()) {
+    return Status::InvalidArgument("logfile number overflow");
+  }
 
   // mem_ must be initialized before replay since replay fills it.
   mem_ = new MemTable(icmp_);
@@ -178,6 +191,9 @@ Status DBImpl::RecoverLogFile(uint64_t number, SequenceNumber* max_sequence) {
   // only real damage in the middle of a log fails.
   // Note: in Week 2, MANIFEST and L0 flush will allow retiring logs and keeping prefixes.
   while (reader.ReadRecord(&record, &scratch)) {
+    if (reporter.has_corruption()) {
+      break;
+    }
     if (record.size() < 12) {
       reporter.Corruption(record.size(), Status::Corruption("log record too small"));
       break;
@@ -219,6 +235,11 @@ Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
     return bg_error_;
   }
 
+  Status s = batch->Iterate(nullptr);
+  if (!s.ok()) {
+    return s;
+  }
+
   const uint32_t count = WriteBatchInternal::Count(batch);
   if (count == 0) {
     return Status::OK();
@@ -231,7 +252,7 @@ Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
 
   WriteBatchInternal::SetSequence(batch, seq);
 
-  Status s = log_->AddRecord(WriteBatchInternal::Contents(batch));
+  s = log_->AddRecord(WriteBatchInternal::Contents(batch));
   if (s.ok() && opts.sync) {
     s = logfile_->Sync();
   }
@@ -248,6 +269,10 @@ Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
 }
 
 Status DBImpl::Get(const ReadOptions& opts, std::string_view key, std::string* value) {
+  if (value == nullptr) {
+    return Status::InvalidArgument("value pointer is null");
+  }
+
   SequenceNumber snapshot;
   MemTable* mem = nullptr;
   {

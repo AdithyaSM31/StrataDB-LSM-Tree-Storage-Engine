@@ -98,6 +98,10 @@ TEST(FileNameTest, ParseTableAndTempFiles) {
   EXPECT_EQ(number, 8u);
   EXPECT_EQ(type, FileType::kTableFile);
 
+  EXPECT_TRUE(ParseFileName("000008.ldb", &number, &type));
+  EXPECT_EQ(number, 8u);
+  EXPECT_EQ(type, FileType::kTableFile);
+
   EXPECT_TRUE(ParseFileName("000009.dbtmp", &number, &type));
   EXPECT_EQ(number, 9u);
   EXPECT_EQ(type, FileType::kTempFile);

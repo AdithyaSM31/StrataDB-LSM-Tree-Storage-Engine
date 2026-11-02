@@ -55,7 +55,11 @@ Status WriteBatch::Iterate(Handler* handler) const {
     return Status::Corruption("malformed WriteBatch (too small)");
   }
 
+  const SequenceNumber seq = DecodeFixed64(rep_.data());
   const uint32_t count = DecodeFixed32(rep_.data() + 8);
+  if (seq > kMaxSequenceNumber || (count > 0 && seq + count - 1 > kMaxSequenceNumber)) {
+    return Status::Corruption("bad sequence number");
+  }
   std::string_view input(rep_.data() + kHeaderSize, rep_.size() - kHeaderSize);
   uint32_t found = 0;
 

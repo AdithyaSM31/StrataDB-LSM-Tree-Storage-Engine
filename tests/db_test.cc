@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "db/filename.h"
+#include "db/write_batch_internal.h"
+#include "log/log_writer.h"
 #include "strata/env.h"
 #include "strata/options.h"
 #include "strata/status.h"
@@ -636,6 +638,144 @@ TEST_F(DBTest, FutureMethodsReturnNotSupported) {
 
   std::string prop;
   EXPECT_FALSE(db_->GetProperty("strata.stats", &prop));
+}
+
+// ---------------------------------------------------------------------------
+// Additional edge cases: empty dirs, numeric replay, empty keys, overflow
+// ---------------------------------------------------------------------------
+
+TEST_F(DBTest, CreateIfMissingFalseOnExistingEmptyDirFails) {
+  // test_dir_ exists as an empty directory (created in SetUp()).
+  // With create_if_missing = false, it must fail because no DB exists.
+  Options opts;
+  opts.create_if_missing = false;
+  std::unique_ptr<DB> db;
+  Status s = DB::Open(opts, test_dir_, &db);
+  EXPECT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  EXPECT_EQ(db, nullptr);
+}
+
+TEST_F(DBTest, ErrorIfExistsOnExistingEmptyDirSucceeds) {
+  // test_dir_ exists as an empty directory with no database.
+  // With error_if_exists = true and create_if_missing = true,
+  // it should succeed because no database exists there yet.
+  Options opts;
+  opts.create_if_missing = true;
+  opts.error_if_exists = true;
+  std::unique_ptr<DB> db;
+  Status s = DB::Open(opts, test_dir_, &db);
+  EXPECT_TRUE(s.ok()) << s.ToString();
+  EXPECT_NE(db, nullptr);
+}
+
+TEST_F(DBTest, ReplayLogsInNumericOrderNotAlphabetical) {
+  // Create log 2 with ("k", "v2") and log 10 with ("k", "v10").
+  // Alphabetically, "000010.log" sorts before "000002.log".
+  // Numerically, 2 < 10. Replay must happen in numeric order (2, then 10),
+  // so the final value for "k" must be "v10".
+  const std::string log2_path = LogFileName(test_dir_, 2);
+  const std::string log10_path = LogFileName(test_dir_, 10);
+
+  std::unique_ptr<WritableFile> f2;
+  ASSERT_TRUE(env_->NewWritableFile(log2_path, &f2).ok());
+  log::Writer w2(f2.get());
+  WriteBatch b2;
+  WriteBatchInternal::SetSequence(&b2, 100);
+  b2.Put("k", "v2");
+  ASSERT_TRUE(w2.AddRecord(WriteBatchInternal::Contents(&b2)).ok());
+  ASSERT_TRUE(f2->Close().ok());
+
+  std::unique_ptr<WritableFile> f10;
+  ASSERT_TRUE(env_->NewWritableFile(log10_path, &f10).ok());
+  log::Writer w10(f10.get());
+  WriteBatch b10;
+  WriteBatchInternal::SetSequence(&b10, 200);
+  b10.Put("k", "v10");
+  ASSERT_TRUE(w10.AddRecord(WriteBatchInternal::Contents(&b10)).ok());
+  ASSERT_TRUE(f10->Close().ok());
+
+  Options opts;
+  opts.create_if_missing = false;
+  ASSERT_TRUE(Open(opts).ok());
+  EXPECT_EQ(Get("k"), "v10");
+
+  // A subsequent Put gets sequence > 200:
+  ASSERT_TRUE(Put("k", "v11").ok());
+  Close();
+  ASSERT_TRUE(Reopen(opts).ok());
+  EXPECT_EQ(Get("k"), "v11");
+}
+
+TEST_F(DBTest, EmptyKeyAndEmptyValue) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("", "empty_key_val").ok());
+  ASSERT_TRUE(Put("non_empty_key", "").ok());
+  ASSERT_TRUE(Put("", "").ok());
+
+  EXPECT_EQ(Get(""), "");
+  EXPECT_EQ(Get("non_empty_key"), "");
+
+  // Reopen and verify persistence
+  Close();
+  opts.create_if_missing = false;
+  ASSERT_TRUE(Reopen(opts).ok());
+  EXPECT_EQ(Get(""), "");
+  EXPECT_EQ(Get("non_empty_key"), "");
+
+  ASSERT_TRUE(Delete("").ok());
+  Status s;
+  Get("", &s);
+  EXPECT_TRUE(s.IsNotFound());
+}
+
+TEST_F(DBTest, SequenceNumberOverflowInLogFailsWithCorruption) {
+  // A corrupted log record with sequence number > kMaxSequenceNumber
+  // must report corruption and fail Open cleanly without aborting.
+  const std::string log1_path = LogFileName(test_dir_, 1);
+  std::unique_ptr<WritableFile> f1;
+  ASSERT_TRUE(env_->NewWritableFile(log1_path, &f1).ok());
+  log::Writer w1(f1.get());
+  WriteBatch b1;
+  b1.Put("k", "v");
+  // Set sequence to an invalid value > kMaxSequenceNumber
+  WriteBatchInternal::SetSequence(&b1, kMaxSequenceNumber + 100);
+  ASSERT_TRUE(w1.AddRecord(WriteBatchInternal::Contents(&b1)).ok());
+  ASSERT_TRUE(f1->Close().ok());
+
+  Options opts;
+  opts.create_if_missing = false;
+  Status s = Open(opts);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+}
+
+TEST_F(DBTest, GetNullValuePointerReturnsInvalidArgument) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+  Status s = db_->Get(ReadOptions(), "some_key", nullptr);
+  EXPECT_TRUE(s.IsInvalidArgument()) << s.ToString();
+}
+
+TEST_F(DBTest, ReleaseSnapshotSafety) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Calling ReleaseSnapshot with nullptr is a safe no-op:
+  db_->ReleaseSnapshot(nullptr);
+
+  const Snapshot* snap1 = db_->GetSnapshot();
+  ASSERT_NE(snap1, nullptr);
+
+  const Snapshot* snap2 = db_->GetSnapshot();
+  ASSERT_NE(snap2, nullptr);
+
+  // Release snapshots in reverse and normal order safely
+  db_->ReleaseSnapshot(snap1);
+  db_->ReleaseSnapshot(snap2);
 }
 
 }  // namespace
