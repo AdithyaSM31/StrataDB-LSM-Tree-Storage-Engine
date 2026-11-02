@@ -33,8 +33,19 @@ bool ParseInternalKey(std::string_view internal_key, ParsedInternalKey* result) 
 }
 
 int InternalKeyComparator::Compare(std::string_view a, std::string_view b) const {
-  if (a.size() < 8 || b.size() < 8) {
-    return a.compare(b);
+  // A key shorter than 8 bytes has no trailer, so it is not a real internal key
+  // (for example an empty Seek target). Such keys sort before every valid
+  // internal key and are ordered bytewise among themselves. Mixing bytewise and
+  // internal-key comparison any other way breaks transitivity: with
+  // q = ("a", 5, Value), p = ("a", 5, Deletion) and s = "a\x00\x09", a plain
+  // bytewise fallback gives q < p < s < q.
+  const bool a_short = a.size() < 8;
+  const bool b_short = b.size() < 8;
+  if (a_short || b_short) {
+    if (a_short && b_short) {
+      return a.compare(b);
+    }
+    return a_short ? -1 : 1;
   }
   std::string_view ukey_a = ExtractUserKey(a);
   std::string_view ukey_b = ExtractUserKey(b);

@@ -276,6 +276,8 @@ TEST(DbFormatTest, LookupKeyMovedFromAccessorsSafe) {
     std::string long_key(300, 'h');
     LookupKey k1(long_key, 100);
     LookupKey k2 = std::move(k1);
+    // Reading k1 after the move is the point of this test.
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     EXPECT_TRUE(k1.user_key().empty());
     EXPECT_TRUE(k1.internal_key().empty());
     EXPECT_TRUE(k1.memtable_key().empty());
@@ -286,6 +288,8 @@ TEST(DbFormatTest, LookupKeyMovedFromAccessorsSafe) {
   {
     LookupKey k1("short", 50);
     LookupKey k2 = std::move(k1);
+    // Reading k1 after the move is the point of this test.
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     EXPECT_TRUE(k1.user_key().empty());
     EXPECT_TRUE(k1.internal_key().empty());
     EXPECT_TRUE(k1.memtable_key().empty());
@@ -337,10 +341,51 @@ TEST(DbFormatTest, ComparatorShortKeys) {
   std::string k_valid = MakeInternalKey("z_valid", 10, kTypeValue);
   std::string k_short = "a_short";
 
-  // Comparison with short key falls back to byte comparison safely without underflow.
+  // A short key sorts before every valid internal key, without underflow.
   EXPECT_GT(cmp.Compare(k_valid, k_short), 0);
   EXPECT_LT(cmp.Compare(k_short, k_valid), 0);
   EXPECT_EQ(cmp.Compare(k_short, k_short), 0);
+
+  // That holds even when the short key is bytewise greater than the valid one.
+  const std::string k_short_high = "zzz";
+  const std::string k_valid_low = MakeInternalKey("a", 1, kTypeValue);
+  EXPECT_LT(cmp.Compare(k_short_high, k_valid_low), 0);
+
+  // Short keys are ordered bytewise among themselves.
+  EXPECT_LT(cmp.Compare("", "a"), 0);
+  EXPECT_LT(cmp.Compare("a", "b"), 0);
+}
+
+TEST(DbFormatTest, ComparatorIsTransitiveWithShortKeys) {
+  // Before short keys were given a fixed place in the order, a bytewise
+  // fallback made these three keys a cycle: q < p, p < s and s < q.
+  InternalKeyComparator cmp;
+  const std::string q = MakeInternalKey("a", 5, kTypeValue);     // trailer bytes 01 05 ...
+  const std::string p = MakeInternalKey("a", 5, kTypeDeletion);  // trailer bytes 00 05 ...
+  const std::string s("a\x00\x09", 3);                           // shorter than 8 bytes
+
+  // Check every ordered triple drawn from these keys plus a few others.
+  const std::vector<std::string> keys = {
+      q,
+      p,
+      s,
+      "",
+      "zzz",
+      MakeInternalKey("", 0, kTypeDeletion),
+      MakeInternalKey("b", 9, kTypeValue),
+  };
+  for (const auto& x : keys) {
+    EXPECT_EQ(cmp.Compare(x, x), 0);
+    for (const auto& y : keys) {
+      // Antisymmetry: the sign flips when the arguments swap.
+      EXPECT_EQ(cmp.Compare(x, y) < 0, cmp.Compare(y, x) > 0);
+      for (const auto& z : keys) {
+        if (cmp.Compare(x, y) < 0 && cmp.Compare(y, z) < 0) {
+          EXPECT_LT(cmp.Compare(x, z), 0) << "transitivity broken";
+        }
+      }
+    }
+  }
 }
 
 }  // namespace

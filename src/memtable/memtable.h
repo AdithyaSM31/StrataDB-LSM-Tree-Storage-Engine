@@ -38,12 +38,14 @@ class MemTable {
   // false -> no entry for this user key here; the caller checks the next layer
   bool Get(const LookupKey& key, std::string* value, Status* s);
 
-  std::unique_ptr<Iterator> NewIterator();  // yields internal keys and values
+  // Returns an iterator over internal keys and their values.
+  // The iterator points into this memtable's arena and does not take a
+  // reference: the caller must keep the memtable referenced (Ref) for as long
+  // as the iterator is alive.
+  std::unique_ptr<Iterator> NewIterator();
 
  private:
   ~MemTable();  // private: only Unref() may delete
-
-  friend class MemTableIterator;
 
   KeyComparator comparator_;
   int refs_;  // REQUIRES: DB mutex held

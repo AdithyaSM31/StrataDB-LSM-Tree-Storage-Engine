@@ -13,14 +13,14 @@ Tick items off as they land; each one should arrive with its tests.
 
 **Milestone:** Put, Get and Delete work and survive a restart, with no SSTables yet.
 
-- [ ] `Status`, varint/fixed coding, CRC32C, arena, hash, random
-- [ ] `Env` interface and `PosixEnv` (`pread`, `write`, `fdatasync`, `rename`, directory fsync, `flock`)
-- [ ] Skiplist with atomic next-pointers, including the concurrent reader test
+- [x] `Status`, varint/fixed coding, CRC32C, arena, hash, random
+- [x] `Env` interface and `PosixEnv` (`pread`, `write`, `fdatasync`, `rename`, directory fsync, `flock`)
+- [x] Skiplist with atomic next-pointers, including the concurrent reader test
 - [x] Internal key format, comparator, MemTable and MemTable iterator
 - [ ] WriteBatch (8-byte sequence, 4-byte count, then records)
 - [ ] Log writer and reader, with truncation and bit-flip tests
 - [ ] Minimal `DBImpl`: write goes to WAL then memtable; Open replays the WAL
-- [ ] Delete `tests/smoke_test.cc` and `src/version.cc` once real code replaces them
+- [x] Delete `tests/smoke_test.cc` and `src/version.cc` once real code replaces them
 
 ## Week 2 (9–15 Nov): SSTables and flush
 

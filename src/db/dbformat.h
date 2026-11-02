@@ -68,6 +68,8 @@ class InternalKeyComparator {
  public:
   InternalKeyComparator() = default;
 
+  // A key shorter than 8 bytes is not a valid internal key; it sorts before
+  // every valid internal key, so seeking with one positions at the start.
   int Compare(std::string_view a, std::string_view b) const;
   int Compare(const ParsedInternalKey& a, const ParsedInternalKey& b) const;
 

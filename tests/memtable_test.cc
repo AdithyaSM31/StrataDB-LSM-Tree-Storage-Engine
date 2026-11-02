@@ -265,7 +265,7 @@ TEST(MemTableTest, ApproximateMemoryUsageGrows) {
   for (int i = 0; i < 500; ++i) {
     std::string k = "key_" + std::to_string(i);
     std::string v = std::string(100, 'x');
-    mem->Add(static_cast<SequenceNumber>(i + 1), kTypeValue, k, v);
+    mem->Add(static_cast<SequenceNumber>(i) + 1, kTypeValue, k, v);
   }
 
   size_t final_usage = mem->ApproximateMemoryUsage();
@@ -289,6 +289,7 @@ TEST(MemTableTest, ModelTestRandomAddsDeletesAndGets) {
   std::mt19937_64 rng(1337);
 
   std::vector<std::string> keys;
+  keys.reserve(20);
   for (int i = 0; i < 20; ++i) {
     keys.push_back("key_" + std::to_string(i));
   }
@@ -297,7 +298,7 @@ TEST(MemTableTest, ModelTestRandomAddsDeletesAndGets) {
   const int kNumOps = 2000;
 
   for (int op = 0; op < kNumOps; ++op) {
-    int key_idx = rng() % keys.size();
+    const size_t key_idx = static_cast<size_t>(rng() % keys.size());
     const std::string& k = keys[key_idx];
     bool is_delete = (rng() % 5 == 0);  // 20% deletes
 
@@ -313,7 +314,7 @@ TEST(MemTableTest, ModelTestRandomAddsDeletesAndGets) {
 
     // Random Gets at various snapshot sequence numbers
     if (op % 10 == 0) {
-      int read_key_idx = rng() % keys.size();
+      const size_t read_key_idx = static_cast<size_t>(rng() % keys.size());
       const std::string& read_k = keys[read_key_idx];
       SequenceNumber read_seq = (rng() % current_seq) + 1;
 
@@ -466,8 +467,10 @@ TEST(MemTableTest, ConcurrentOneWriterFourReaders) {
       Status s;
       while (!stop.load(std::memory_order_acquire)) {
         SequenceNumber cur = latest_seq.load(std::memory_order_acquire);
-        if (cur == 0) continue;
-        int k_idx = rng() % kNumKeys;
+        if (cur == 0) {
+          continue;
+        }
+        const int k_idx = static_cast<int>(rng() % kNumKeys);
         std::string key = "key_" + std::to_string(k_idx);
         SequenceNumber read_seq = (rng() % cur) + 1;
         LookupKey lk(key, read_seq);
