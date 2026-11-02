@@ -36,7 +36,7 @@ void MemTable::Unref() {
   }
 }
 
-size_t MemTable::ApproximateMemoryUsage() { return arena_.MemoryUsage(); }
+size_t MemTable::ApproximateMemoryUsage() const { return arena_.MemoryUsage(); }
 
 void MemTable::Add(SequenceNumber seq, ValueType type, std::string_view key,
                    std::string_view value) {
@@ -46,17 +46,23 @@ void MemTable::Add(SequenceNumber seq, ValueType type, std::string_view key,
   const size_t key_size = key.size();
   const size_t val_size = value.size();
   const size_t internal_key_size = key_size + 8;
+  STRATA_CHECK(internal_key_size <= UINT32_MAX);
+  STRATA_CHECK(val_size <= UINT32_MAX);
   const size_t encoded_len =
       VarintLength(internal_key_size) + internal_key_size + VarintLength(val_size) + val_size;
 
   char* const buf = arena_.Allocate(encoded_len);
   char* p = EncodeVarint32(buf, static_cast<uint32_t>(internal_key_size));
-  std::memcpy(p, key.data(), key_size);
+  if (key_size > 0) {
+    std::memcpy(p, key.data(), key_size);
+  }
   p += key_size;
-  EncodeFixed64(p, (seq << 8) | static_cast<uint8_t>(type));
+  EncodeFixed64(p, PackSequenceAndType(seq, type));
   p += 8;
   p = EncodeVarint32(p, static_cast<uint32_t>(val_size));
-  std::memcpy(p, value.data(), val_size);
+  if (val_size > 0) {
+    std::memcpy(p, value.data(), val_size);
+  }
   p += val_size;
   STRATA_DCHECK(p == buf + encoded_len);
 
@@ -71,10 +77,13 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
   }
 
   const char* entry = iter.key();
-  uint32_t key_length;
+  uint32_t key_length = 0;
   const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
   STRATA_DCHECK(key_ptr != nullptr);
   STRATA_DCHECK(key_length >= 8);
+  if (key_ptr == nullptr || key_length < 8) {
+    return false;
+  }
 
   std::string_view entry_user_key(key_ptr, key_length - 8);
   if (entry_user_key != key.user_key()) {
@@ -123,21 +132,28 @@ class MemTableIterator : public Iterator {
 
   void Next() override {
     STRATA_DCHECK(Valid());
-    iter_.Next();
+    if (Valid()) {
+      iter_.Next();
+    }
   }
 
   void Prev() override {
     STRATA_DCHECK(Valid());
-    iter_.Prev();
+    if (Valid()) {
+      iter_.Prev();
+    }
   }
 
   std::string_view key() const override {
     STRATA_DCHECK(Valid());
-    return GetLengthPrefixedSlice(iter_.key());
+    return Valid() ? GetLengthPrefixedSlice(iter_.key()) : std::string_view();
   }
 
   std::string_view value() const override {
     STRATA_DCHECK(Valid());
+    if (!Valid()) {
+      return std::string_view();
+    }
     std::string_view key_slice = GetLengthPrefixedSlice(iter_.key());
     return GetLengthPrefixedSlice(key_slice.data() + key_slice.size());
   }

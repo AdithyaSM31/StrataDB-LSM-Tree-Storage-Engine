@@ -26,6 +26,13 @@ enum ValueType : uint8_t {
 // order, the highest ValueType sorts first.
 inline constexpr ValueType kValueTypeForSeek = kTypeValue;
 
+// Helper to pack sequence number and value type into a 64-bit integer trailer.
+inline uint64_t PackSequenceAndType(SequenceNumber seq, ValueType type) {
+  STRATA_DCHECK(seq <= kMaxSequenceNumber);
+  STRATA_DCHECK(static_cast<uint8_t>(type) <= static_cast<uint8_t>(kTypeValue));
+  return (seq << 8) | static_cast<uint8_t>(type);
+}
+
 struct ParsedInternalKey {
   std::string_view user_key;
   SequenceNumber sequence = 0;
@@ -43,7 +50,8 @@ bool ParseInternalKey(std::string_view internal_key, ParsedInternalKey* result);
 // REQUIRES: internal_key.size() >= 8
 inline std::string_view ExtractUserKey(std::string_view internal_key) {
   STRATA_DCHECK(internal_key.size() >= 8);
-  return internal_key.substr(0, internal_key.size() - 8);
+  return (internal_key.size() >= 8) ? internal_key.substr(0, internal_key.size() - 8)
+                                    : std::string_view();
 }
 
 // Helper to construct a std::string containing an encoded internal key.
@@ -85,13 +93,25 @@ class LookupKey {
   LookupKey& operator=(LookupKey&& other) noexcept;
 
   // Key format for memtable search: [ varint32 internal_key_len ][ internal key ]
-  std::string_view memtable_key() const { return std::string_view(start_, end_ - start_); }
+  std::string_view memtable_key() const {
+    return (start_ != nullptr && end_ >= start_)
+               ? std::string_view(start_, static_cast<size_t>(end_ - start_))
+               : std::string_view();
+  }
 
   // Key format for SSTable search: [ user key ][ 8-byte trailer ]
-  std::string_view internal_key() const { return std::string_view(kstart_, end_ - kstart_); }
+  std::string_view internal_key() const {
+    return (kstart_ != nullptr && end_ >= kstart_)
+               ? std::string_view(kstart_, static_cast<size_t>(end_ - kstart_))
+               : std::string_view();
+  }
 
   // Plain user key
-  std::string_view user_key() const { return std::string_view(kstart_, end_ - kstart_ - 8); }
+  std::string_view user_key() const {
+    return (kstart_ != nullptr && end_ >= kstart_ + 8)
+               ? std::string_view(kstart_, static_cast<size_t>(end_ - kstart_ - 8))
+               : std::string_view();
+  }
 
  private:
   const char* start_ = nullptr;

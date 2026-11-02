@@ -4,21 +4,20 @@
 
 namespace strata {
 
-static uint64_t PackSequenceAndType(SequenceNumber seq, ValueType type) {
-  STRATA_DCHECK(seq <= kMaxSequenceNumber);
-  STRATA_DCHECK(static_cast<uint8_t>(type) <= static_cast<uint8_t>(kTypeValue));
-  return (seq << 8) | static_cast<uint8_t>(type);
-}
-
 void AppendInternalKey(std::string* result, const ParsedInternalKey& key) {
   STRATA_DCHECK(result != nullptr);
-  result->append(key.user_key.data(), key.user_key.size());
+  if (result == nullptr) {
+    return;
+  }
+  if (!key.user_key.empty()) {
+    result->append(key.user_key.data(), key.user_key.size());
+  }
   PutFixed64(result, PackSequenceAndType(key.sequence, key.type));
 }
 
 bool ParseInternalKey(std::string_view internal_key, ParsedInternalKey* result) {
   STRATA_DCHECK(result != nullptr);
-  if (internal_key.size() < 8) {
+  if (result == nullptr || internal_key.size() < 8) {
     return false;
   }
   const size_t n = internal_key.size();
@@ -34,8 +33,9 @@ bool ParseInternalKey(std::string_view internal_key, ParsedInternalKey* result) 
 }
 
 int InternalKeyComparator::Compare(std::string_view a, std::string_view b) const {
-  STRATA_DCHECK(a.size() >= 8);
-  STRATA_DCHECK(b.size() >= 8);
+  if (a.size() < 8 || b.size() < 8) {
+    return a.compare(b);
+  }
   std::string_view ukey_a = ExtractUserKey(a);
   std::string_view ukey_b = ExtractUserKey(b);
   int r = ukey_a.compare(ukey_b);
@@ -73,12 +73,15 @@ LookupKey::LookupKey(std::string_view user_key, SequenceNumber sequence) {
   STRATA_DCHECK(sequence <= kMaxSequenceNumber);
   const size_t usize = user_key.size();
   const size_t internal_key_size = usize + 8;
+  STRATA_CHECK(internal_key_size <= UINT32_MAX);
   const size_t needed = VarintLength(internal_key_size) + internal_key_size;
   char* dst = (needed <= sizeof(space_)) ? space_ : new char[needed];
   start_ = dst;
   dst = EncodeVarint32(dst, static_cast<uint32_t>(internal_key_size));
   kstart_ = dst;
-  std::memcpy(dst, user_key.data(), usize);
+  if (usize > 0) {
+    std::memcpy(dst, user_key.data(), usize);
+  }
   dst += usize;
   EncodeFixed64(dst, PackSequenceAndType(sequence, kValueTypeForSeek));
   dst += 8;
@@ -95,7 +98,9 @@ LookupKey::~LookupKey() {
 LookupKey::LookupKey(LookupKey&& other) noexcept {
   if (other.start_ == other.space_) {
     const size_t size = other.end_ - other.start_;
-    std::memcpy(space_, other.space_, size);
+    if (size > 0) {
+      std::memcpy(space_, other.space_, size);
+    }
     start_ = space_;
     kstart_ = space_ + (other.kstart_ - other.start_);
     end_ = space_ + size;
@@ -103,10 +108,10 @@ LookupKey::LookupKey(LookupKey&& other) noexcept {
     start_ = other.start_;
     kstart_ = other.kstart_;
     end_ = other.end_;
-    other.start_ = other.space_;
-    other.kstart_ = other.space_;
-    other.end_ = other.space_;
   }
+  other.start_ = other.space_;
+  other.kstart_ = other.space_;
+  other.end_ = other.space_;
 }
 
 LookupKey& LookupKey::operator=(LookupKey&& other) noexcept {
@@ -116,7 +121,9 @@ LookupKey& LookupKey::operator=(LookupKey&& other) noexcept {
     }
     if (other.start_ == other.space_) {
       const size_t size = other.end_ - other.start_;
-      std::memcpy(space_, other.space_, size);
+      if (size > 0) {
+        std::memcpy(space_, other.space_, size);
+      }
       start_ = space_;
       kstart_ = space_ + (other.kstart_ - other.start_);
       end_ = space_ + size;
@@ -124,10 +131,10 @@ LookupKey& LookupKey::operator=(LookupKey&& other) noexcept {
       start_ = other.start_;
       kstart_ = other.kstart_;
       end_ = other.end_;
-      other.start_ = other.space_;
-      other.kstart_ = other.space_;
-      other.end_ = other.space_;
     }
+    other.start_ = other.space_;
+    other.kstart_ = other.space_;
+    other.end_ = other.space_;
   }
   return *this;
 }

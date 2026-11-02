@@ -246,5 +246,102 @@ TEST(DbFormatTest, LookupKeyMoveSemantics) {
   }
 }
 
+TEST(DbFormatTest, LookupKeyBoundaryBufferSizes) {
+  // Test key sizes right around the 200-byte inline buffer boundary.
+  // internal_key_size = usize + 8.
+  // For internal_key_size in [128, 16383], VarintLength is 2.
+  // needed = 2 + usize + 8 = usize + 10.
+  // needed == 199 => usize = 189
+  // needed == 200 => usize = 190 (exact fit in space_[200])
+  // needed == 201 => usize = 191 (spills to heap)
+  for (size_t usize : {189u, 190u, 191u}) {
+    std::string ukey(usize, 'a');
+    SequenceNumber seq = 42;
+    LookupKey lkey(ukey, seq);
+
+    EXPECT_EQ(lkey.user_key(), ukey);
+    std::string expected_internal = MakeInternalKey(ukey, seq, kValueTypeForSeek);
+    EXPECT_EQ(lkey.internal_key(), expected_internal);
+
+    std::string expected_memtable;
+    PutLengthPrefixed(&expected_memtable, expected_internal);
+    EXPECT_EQ(lkey.memtable_key(), expected_memtable);
+  }
+}
+
+TEST(DbFormatTest, LookupKeyMovedFromAccessorsSafe) {
+  // Verify moved-from accessors do not underflow size_t or access invalid memory.
+  // Heap case:
+  {
+    std::string long_key(300, 'h');
+    LookupKey k1(long_key, 100);
+    LookupKey k2 = std::move(k1);
+    EXPECT_TRUE(k1.user_key().empty());
+    EXPECT_TRUE(k1.internal_key().empty());
+    EXPECT_TRUE(k1.memtable_key().empty());
+    EXPECT_EQ(k2.user_key(), long_key);
+  }
+
+  // Inline case:
+  {
+    LookupKey k1("short", 50);
+    LookupKey k2 = std::move(k1);
+    EXPECT_TRUE(k1.user_key().empty());
+    EXPECT_TRUE(k1.internal_key().empty());
+    EXPECT_TRUE(k1.memtable_key().empty());
+    EXPECT_EQ(k2.user_key(), "short");
+  }
+}
+
+TEST(DbFormatTest, EmptyStringViewNullDataHandling) {
+  // Default constructed std::string_view has data() == nullptr and size() == 0.
+  std::string_view empty_sv;
+  ASSERT_EQ(empty_sv.data(), nullptr);
+  ASSERT_EQ(empty_sv.size(), 0u);
+
+  // AppendInternalKey must not invoke undefined behavior passing nullptr to append.
+  std::string encoded;
+  AppendInternalKey(&encoded, ParsedInternalKey{empty_sv, 10, kTypeValue});
+  EXPECT_EQ(encoded.size(), 8u);
+  EXPECT_EQ(ExtractUserKey(encoded), "");
+
+  // LookupKey must not invoke undefined behavior passing nullptr to memcpy.
+  LookupKey lkey(empty_sv, 10);
+  EXPECT_EQ(lkey.user_key(), "");
+  EXPECT_EQ(lkey.internal_key(), encoded);
+}
+
+#if STRATA_DEBUG_CHECKS
+TEST(DbFormatTest, ParseInternalKeyNullResultAborts) {
+  std::string encoded = MakeInternalKey("key", 1, kTypeValue);
+  EXPECT_DEATH(ParseInternalKey(encoded, nullptr), "check failed");
+}
+
+TEST(DbFormatTest, ExtractUserKeyShortKeyAborts) {
+  EXPECT_DEATH(ExtractUserKey("short"), "check failed");
+}
+#else
+TEST(DbFormatTest, ParseInternalKeyNullResult) {
+  std::string encoded = MakeInternalKey("key", 1, kTypeValue);
+  EXPECT_FALSE(ParseInternalKey(encoded, nullptr));
+}
+
+TEST(DbFormatTest, ExtractUserKeyShortKey) {
+  EXPECT_EQ(ExtractUserKey("abc"), "");
+  EXPECT_EQ(ExtractUserKey(""), "");
+}
+#endif
+
+TEST(DbFormatTest, ComparatorShortKeys) {
+  InternalKeyComparator cmp;
+  std::string k_valid = MakeInternalKey("z_valid", 10, kTypeValue);
+  std::string k_short = "a_short";
+
+  // Comparison with short key falls back to byte comparison safely without underflow.
+  EXPECT_GT(cmp.Compare(k_valid, k_short), 0);
+  EXPECT_LT(cmp.Compare(k_short, k_valid), 0);
+  EXPECT_EQ(cmp.Compare(k_short, k_short), 0);
+}
+
 }  // namespace
 }  // namespace strata

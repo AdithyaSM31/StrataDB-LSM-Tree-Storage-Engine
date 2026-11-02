@@ -29,7 +29,7 @@ class MemTable {
   void Ref();
   void Unref();  // deletes itself when the count reaches 0
 
-  size_t ApproximateMemoryUsage();  // arena_.MemoryUsage()
+  size_t ApproximateMemoryUsage() const;  // arena_.MemoryUsage()
 
   // REQUIRES: one writer at a time (the write leader).
   void Add(SequenceNumber seq, ValueType type, std::string_view key, std::string_view value);

@@ -365,6 +365,76 @@ TEST(MemTableTest, ReferenceCounting) {
   // ASan / LSan will fail if memory is leaked.
 }
 
+TEST(MemTableTest, SeekEmptyTargetAndShortTarget) {
+  InternalKeyComparator cmp;
+  auto* mem = new MemTable(cmp);
+  mem->Ref();
+
+  mem->Add(1, kTypeValue, "a", "val_a");
+  mem->Add(2, kTypeValue, "b", "val_b");
+
+  std::unique_ptr<Iterator> it = mem->NewIterator();
+
+  // Empty seek target should land on the first entry without crashing or underflowing
+  it->Seek("");
+  ASSERT_TRUE(it->Valid());
+  EXPECT_EQ(ExtractUserKey(it->key()), "a");
+
+  // Short seek target (< 8 bytes) should also be safely compared
+  it->Seek("a");
+  ASSERT_TRUE(it->Valid());
+  EXPECT_EQ(ExtractUserKey(it->key()), "a");
+
+  mem->Unref();
+}
+
+TEST(MemTableTest, EmptyKeyAndValueHandling) {
+  InternalKeyComparator cmp;
+  auto* mem = new MemTable(cmp);
+  mem->Ref();
+
+  // Add empty user key and empty value using default-constructed string_views (null data)
+  std::string_view empty_key;
+  std::string_view empty_val;
+  mem->Add(10, kTypeValue, empty_key, empty_val);
+
+  std::string val = "dummy";
+  Status s;
+  LookupKey lk(empty_key, 10);
+  EXPECT_TRUE(mem->Get(lk, &val, &s));
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(val, "");
+
+  std::unique_ptr<Iterator> it = mem->NewIterator();
+  it->SeekToFirst();
+  ASSERT_TRUE(it->Valid());
+  EXPECT_EQ(ExtractUserKey(it->key()), "");
+  EXPECT_EQ(it->value(), "");
+
+  mem->Unref();
+}
+
+TEST(MemTableTest, InvalidIteratorAccessSafe) {
+  InternalKeyComparator cmp;
+  auto* mem = new MemTable(cmp);
+  mem->Ref();
+
+  std::unique_ptr<Iterator> it = mem->NewIterator();
+  EXPECT_FALSE(it->Valid());
+
+  // Non-debug builds should safely return empty views rather than crashing
+#if !STRATA_DEBUG_CHECKS
+  EXPECT_TRUE(it->key().empty());
+  EXPECT_TRUE(it->value().empty());
+  it->Next();
+  EXPECT_FALSE(it->Valid());
+  it->Prev();
+  EXPECT_FALSE(it->Valid());
+#endif
+
+  mem->Unref();
+}
+
 TEST(MemTableTest, ConcurrentOneWriterFourReaders) {
   InternalKeyComparator cmp;
   auto* mem = new MemTable(cmp);
@@ -386,10 +456,10 @@ TEST(MemTableTest, ConcurrentOneWriterFourReaders) {
     stop.store(true, std::memory_order_release);
   });
 
-  // 4 Reader threads
+  // 3 Point lookup reader threads
   std::vector<std::thread> readers;
   readers.reserve(4);
-  for (int r = 0; r < 4; ++r) {
+  for (int r = 0; r < 3; ++r) {
     readers.emplace_back([&, r]() {
       std::mt19937_64 rng(42 + r);
       std::string val;
@@ -401,10 +471,35 @@ TEST(MemTableTest, ConcurrentOneWriterFourReaders) {
         std::string key = "key_" + std::to_string(k_idx);
         SequenceNumber read_seq = (rng() % cur) + 1;
         LookupKey lk(key, read_seq);
-        mem->Get(lk, &val, &s);
+        if (mem->Get(lk, &val, &s)) {
+          EXPECT_TRUE(s.ok());
+          // Value format must be val_<seq>
+          EXPECT_GE(val.size(), 5u);
+          EXPECT_EQ(val.substr(0, 4), "val_");
+          SequenceNumber found_seq = std::stoull(val.substr(4));
+          EXPECT_LE(found_seq, read_seq);
+          EXPECT_EQ(found_seq % kNumKeys, static_cast<SequenceNumber>(k_idx));
+        }
       }
     });
   }
+
+  // 1 Range scanning reader thread
+  readers.emplace_back([&]() {
+    while (!stop.load(std::memory_order_acquire)) {
+      std::unique_ptr<Iterator> it = mem->NewIterator();
+      it->SeekToFirst();
+      std::string prev_key;
+      while (it->Valid()) {
+        std::string cur_key(it->key());
+        if (!prev_key.empty()) {
+          EXPECT_LE(cmp.Compare(prev_key, cur_key), 0);
+        }
+        prev_key = cur_key;
+        it->Next();
+      }
+    }
+  });
 
   writer.join();
   for (auto& reader : readers) {
