@@ -26,7 +26,9 @@ Reader::Reader(SequentialFile* file, Reporter* reporter, bool checksum)
       backing_store_(std::make_unique<char[]>(kBlockSize)),
       buffer_(),
       eof_(false),
-      in_fragmented_record_(false) {}
+      in_fragmented_record_(false) {
+  STRATA_DCHECK(file_ != nullptr);
+}
 
 void Reader::ReportCorruption(size_t bytes, const Status& status) {
   if (reporter_ != nullptr) {
@@ -35,6 +37,7 @@ void Reader::ReportCorruption(size_t bytes, const Status& status) {
 }
 
 int Reader::ReadPhysicalRecord(std::string_view* result) {
+  STRATA_DCHECK(result != nullptr);
   while (true) {
     if (buffer_.size() < kHeaderSize) {
       if (!eof_) {
@@ -94,6 +97,8 @@ int Reader::ReadPhysicalRecord(std::string_view* result) {
 }
 
 bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
+  STRATA_DCHECK(record != nullptr);
+  STRATA_DCHECK(scratch != nullptr);
   scratch->clear();
   std::string_view fragment;
 

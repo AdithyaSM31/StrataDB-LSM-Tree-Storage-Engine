@@ -340,5 +340,93 @@ TEST(WriteBatchTest, Corruption) {
   }
 }
 
+TEST(WriteBatchTest, SelfAppend) {
+  WriteBatch b;
+  WriteBatchInternal::SetSequence(&b, 100);
+  b.Put("key1", "val1");
+  b.Delete("key2");
+
+  EXPECT_EQ(WriteBatchInternal::Count(&b), 2u);
+
+  // Self-append must double count and duplicate records without memory aliasing errors.
+  b.Append(b);
+  EXPECT_EQ(WriteBatchInternal::Count(&b), 4u);
+  EXPECT_EQ(WriteBatchInternal::Sequence(&b), 100u);
+
+  RecordingHandler handler;
+  Status s = b.Iterate(&handler);
+  EXPECT_TRUE(s.ok());
+  ASSERT_EQ(handler.ops.size(), 4u);
+  EXPECT_EQ(handler.ops[0].key, "key1");
+  EXPECT_EQ(handler.ops[0].value, "val1");
+  EXPECT_EQ(handler.ops[1].key, "key2");
+  EXPECT_EQ(handler.ops[1].type, RecordingHandler::Operation::kDelete);
+  EXPECT_EQ(handler.ops[2].key, "key1");
+  EXPECT_EQ(handler.ops[2].value, "val1");
+  EXPECT_EQ(handler.ops[3].key, "key2");
+  EXPECT_EQ(handler.ops[3].type, RecordingHandler::Operation::kDelete);
+
+  // Test self-append with large batch that forces string reallocation
+  WriteBatch large_b;
+  for (int i = 0; i < 50; ++i) {
+    large_b.Put("large_key_" + std::to_string(i), std::string(100, 'x'));
+  }
+  EXPECT_EQ(WriteBatchInternal::Count(&large_b), 50u);
+  large_b.Append(large_b);
+  EXPECT_EQ(WriteBatchInternal::Count(&large_b), 100u);
+}
+
+TEST(WriteBatchTest, IterateNullHandler) {
+  WriteBatch valid;
+  valid.Put("k1", "v1");
+  valid.Delete("k2");
+
+  // Valid batch with null handler returns OK (useful for validation-only check)
+  EXPECT_TRUE(valid.Iterate(nullptr).ok());
+
+  // Corrupted batch with null handler returns corruption
+  WriteBatch corrupted;
+  WriteBatchInternal::SetContents(&corrupted, "too_small");
+  EXPECT_TRUE(corrupted.Iterate(nullptr).IsCorruption());
+}
+
+TEST(WriteBatchTest, SetSequenceOnSmallBatch) {
+  WriteBatch b;
+  WriteBatchInternal::SetContents(&b, std::string(9, 'A'));
+  EXPECT_EQ(b.ApproximateSize(), 9u);
+
+  WriteBatchInternal::SetSequence(&b, 54321);
+  EXPECT_GE(b.ApproximateSize(), 12u);
+  EXPECT_EQ(WriteBatchInternal::Sequence(&b), 54321u);
+}
+
+TEST(WriteBatchTest, EmptyKeyAndValue) {
+  WriteBatch batch;
+  batch.Put("", "");
+  batch.Put("", "v");
+  batch.Put("k", "");
+  batch.Delete("");
+
+  EXPECT_EQ(WriteBatchInternal::Count(&batch), 4u);
+
+  RecordingHandler handler;
+  EXPECT_TRUE(batch.Iterate(&handler).ok());
+  ASSERT_EQ(handler.ops.size(), 4u);
+  EXPECT_EQ(handler.ops[0].key, "");
+  EXPECT_EQ(handler.ops[0].value, "");
+  EXPECT_EQ(handler.ops[1].key, "");
+  EXPECT_EQ(handler.ops[1].value, "v");
+  EXPECT_EQ(handler.ops[2].key, "k");
+  EXPECT_EQ(handler.ops[2].value, "");
+  EXPECT_EQ(handler.ops[3].key, "");
+  EXPECT_EQ(handler.ops[3].type, RecordingHandler::Operation::kDelete);
+
+  InternalKeyComparator cmp;
+  MemTable* mem = new MemTable(cmp);
+  mem->Ref();
+  EXPECT_TRUE(WriteBatchInternal::InsertInto(&batch, mem).ok());
+  mem->Unref();
+}
+
 }  // namespace
 }  // namespace strata

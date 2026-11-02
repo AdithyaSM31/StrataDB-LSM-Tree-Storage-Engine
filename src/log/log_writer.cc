@@ -17,15 +17,19 @@ static void InitTypeCrc(uint32_t type_crc[kMaxRecordType + 1]) {
   }
 }
 
-Writer::Writer(WritableFile* dest) : dest_(dest), block_offset_(0) { InitTypeCrc(type_crc_); }
+Writer::Writer(WritableFile* dest) : dest_(dest), block_offset_(0) {
+  STRATA_DCHECK(dest_ != nullptr);
+  InitTypeCrc(type_crc_);
+}
 
 Writer::Writer(WritableFile* dest, uint64_t dest_length)
     : dest_(dest), block_offset_(static_cast<int>(dest_length % kBlockSize)) {
+  STRATA_DCHECK(dest_ != nullptr);
   InitTypeCrc(type_crc_);
 }
 
 Status Writer::AddRecord(std::string_view slice) {
-  const char* ptr = slice.data();
+  const char* ptr = (slice.data() != nullptr) ? slice.data() : "";
   size_t left = slice.size();
   bool begin = true;
   Status s;
@@ -72,19 +76,20 @@ Status Writer::AddRecord(std::string_view slice) {
 Status Writer::EmitPhysicalRecord(RecordType type, const char* ptr, size_t length) {
   STRATA_DCHECK(length <= 0xffff);
   STRATA_DCHECK(block_offset_ + kHeaderSize + length <= kBlockSize);
+  const char* safe_ptr = (ptr != nullptr) ? ptr : "";
 
   char buf[kHeaderSize];
   buf[4] = static_cast<char>(length & 0xff);
   buf[5] = static_cast<char>((length >> 8) & 0xff);
   buf[6] = static_cast<char>(type);
 
-  uint32_t crc = crc32c::Extend(type_crc_[type], ptr, length);
+  uint32_t crc = crc32c::Extend(type_crc_[type], safe_ptr, length);
   crc = crc32c::Mask(crc);
   EncodeFixed32(buf, crc);
 
   Status s = dest_->Append(std::string_view(buf, kHeaderSize));
   if (s.ok()) {
-    s = dest_->Append(std::string_view(ptr, length));
+    s = dest_->Append(std::string_view(safe_ptr, length));
     if (s.ok()) {
       s = dest_->Flush();
     }

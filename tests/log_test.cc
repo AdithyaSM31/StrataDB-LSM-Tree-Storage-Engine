@@ -560,5 +560,96 @@ TEST(LogTest, RandomGarbageDoesNotCrash) {
   }
 }
 
+TEST(LogTest, ChecksumDisabledAllowsCorruptedRecord) {
+  StringSink sink;
+  Writer writer(&sink);
+  ASSERT_TRUE(writer.AddRecord("hello_world_data").ok());
+
+  std::string corrupted = sink.contents();
+  // Flip a bit in the payload (byte 7 onwards)
+  corrupted[8] ^= 0x01;
+
+  // With checksum = false, the reader returns the record despite bit corruption
+  TestReporter rep1;
+  auto records1 = ReadAllRecords(corrupted, &rep1, /*checksum=*/false);
+  ASSERT_EQ(records1.size(), 1u);
+  EXPECT_NE(records1[0], "hello_world_data");
+  EXPECT_TRUE(rep1.reports.empty());
+
+  // With checksum = true, the reader detects corruption and reports it
+  TestReporter rep2;
+  auto records2 = ReadAllRecords(corrupted, &rep2, /*checksum=*/true);
+  EXPECT_TRUE(records2.empty());
+  ASSERT_FALSE(rep2.reports.empty());
+  EXPECT_TRUE(rep2.reports[0].status.message().find("checksum mismatch") != std::string::npos);
+}
+
+TEST(LogTest, MultiBlockRecordChecksumMismatchInSecondBlock) {
+  StringSink sink;
+  Writer writer(&sink);
+
+  // Multi-block record (40 KB): block 0 has First fragment, block 1 has Last fragment
+  const std::string multi(40000, 'Z');
+  ASSERT_TRUE(writer.AddRecord(multi).ok());
+  ASSERT_GT(sink.contents().size(), kBlockSize);
+
+  // Pad the rest of block 1 to 2 * kBlockSize so independent_record is cleanly in block 2
+  const size_t rem_block1 = (2 * kBlockSize) - sink.contents().size();
+  const size_t pad_size = rem_block1 - kHeaderSize;
+  const std::string pad(pad_size, 'P');
+  ASSERT_TRUE(writer.AddRecord(pad).ok());
+  ASSERT_EQ(sink.contents().size(), 2 * kBlockSize);
+
+  // Independent record in block 2
+  ASSERT_TRUE(writer.AddRecord("independent_record").ok());
+
+  std::string corrupted = sink.contents();
+  // Corrupt a byte in block 1 payload (offset kBlockSize + 8)
+  corrupted[kBlockSize + 8] ^= 0x42;
+
+  TestReporter reporter;
+  auto records = ReadAllRecords(corrupted, &reporter);
+
+  // The corrupted multi-block record and pad in block 1 should be dropped
+  // The independent record in block 2 should survive cleanly!
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0], "independent_record");
+
+  // Corruption must be reported
+  ASSERT_FALSE(reporter.reports.empty());
+}
+
+TEST(LogTest, AddRecordNullDataEmptyView) {
+  StringSink sink;
+  Writer writer(&sink);
+  // Default constructed string_view has data() == nullptr and size() == 0
+  std::string_view null_view;
+  ASSERT_TRUE(writer.AddRecord(null_view).ok());
+
+  TestReporter reporter;
+  auto records = ReadAllRecords(sink.contents(), &reporter);
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0], "");
+  EXPECT_TRUE(reporter.reports.empty());
+}
+
+TEST(LogTest, TornTailSingleBlockByteByByte) {
+  StringSink sink;
+  Writer writer(&sink);
+  const std::string rec(100, 'T');
+  ASSERT_TRUE(writer.AddRecord(rec).ok());
+
+  const std::string full = sink.contents();
+  ASSERT_EQ(full.size(), 107u);
+
+  for (size_t cut = 0; cut < full.size(); ++cut) {
+    TestReporter reporter;
+    auto records = ReadAllRecords(full.substr(0, cut), &reporter);
+    EXPECT_TRUE(records.empty()) << "Expected 0 records at cut " << cut;
+    EXPECT_TRUE(reporter.reports.empty())
+        << "Torn tail at cut " << cut << " should not report corruption";
+  }
+}
+
 }  // namespace
 }  // namespace strata::log

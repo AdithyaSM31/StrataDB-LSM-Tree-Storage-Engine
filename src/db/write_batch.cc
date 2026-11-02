@@ -34,9 +34,19 @@ void WriteBatch::Delete(std::string_view key) {
 
 void WriteBatch::Append(const WriteBatch& source) {
   const uint32_t src_count = WriteBatchInternal::Count(&source);
-  WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + src_count);
   if (source.rep_.size() > kHeaderSize) {
-    rep_.append(source.rep_.data() + kHeaderSize, source.rep_.size() - kHeaderSize);
+    const std::string_view records(source.rep_.data() + kHeaderSize,
+                                   source.rep_.size() - kHeaderSize);
+    if (&source == this) {
+      const std::string copy(records);
+      WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + src_count);
+      rep_.append(copy);
+      return;
+    }
+    WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + src_count);
+    rep_.append(records.data(), records.size());
+  } else {
+    WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + src_count);
   }
 }
 
@@ -74,6 +84,10 @@ Status WriteBatch::Iterate(Handler* handler) const {
     return Status::Corruption("WriteBatch has wrong count");
   }
 
+  if (handler == nullptr) {
+    return Status::OK();
+  }
+
   // Execution pass: dispatch to handler.
   input = std::string_view(rep_.data() + kHeaderSize, rep_.size() - kHeaderSize);
   while (!input.empty()) {
@@ -96,6 +110,7 @@ Status WriteBatch::Iterate(Handler* handler) const {
 }
 
 uint32_t WriteBatchInternal::Count(const WriteBatch* b) {
+  STRATA_DCHECK(b != nullptr);
   if (b->rep_.size() < kHeaderSize) {
     return 0;
   }
@@ -103,6 +118,7 @@ uint32_t WriteBatchInternal::Count(const WriteBatch* b) {
 }
 
 void WriteBatchInternal::SetCount(WriteBatch* b, uint32_t count) {
+  STRATA_DCHECK(b != nullptr);
   if (b->rep_.size() < kHeaderSize) {
     b->rep_.resize(kHeaderSize, '\0');
   }
@@ -110,6 +126,7 @@ void WriteBatchInternal::SetCount(WriteBatch* b, uint32_t count) {
 }
 
 SequenceNumber WriteBatchInternal::Sequence(const WriteBatch* b) {
+  STRATA_DCHECK(b != nullptr);
   if (b->rep_.size() < 8) {
     return 0;
   }
@@ -117,19 +134,28 @@ SequenceNumber WriteBatchInternal::Sequence(const WriteBatch* b) {
 }
 
 void WriteBatchInternal::SetSequence(WriteBatch* b, SequenceNumber seq) {
-  if (b->rep_.size() < 8) {
+  STRATA_DCHECK(b != nullptr);
+  if (b->rep_.size() < kHeaderSize) {
     b->rep_.resize(kHeaderSize, '\0');
   }
   EncodeFixed64(b->rep_.data(), seq);
 }
 
-std::string_view WriteBatchInternal::Contents(const WriteBatch* b) { return b->rep_; }
+std::string_view WriteBatchInternal::Contents(const WriteBatch* b) {
+  STRATA_DCHECK(b != nullptr);
+  return b->rep_;
+}
 
 void WriteBatchInternal::SetContents(WriteBatch* b, std::string_view contents) {
+  STRATA_DCHECK(b != nullptr);
   b->rep_.assign(contents.data(), contents.size());
 }
 
-void WriteBatchInternal::Append(WriteBatch* dst, const WriteBatch* src) { dst->Append(*src); }
+void WriteBatchInternal::Append(WriteBatch* dst, const WriteBatch* src) {
+  STRATA_DCHECK(dst != nullptr);
+  STRATA_DCHECK(src != nullptr);
+  dst->Append(*src);
+}
 
 namespace {
 
@@ -152,6 +178,8 @@ class MemTableInserter : public WriteBatch::Handler {
 }  // namespace
 
 Status WriteBatchInternal::InsertInto(const WriteBatch* b, MemTable* mem) {
+  STRATA_DCHECK(b != nullptr);
+  STRATA_DCHECK(mem != nullptr);
   MemTableInserter inserter(Sequence(b), mem);
   return b->Iterate(&inserter);
 }
