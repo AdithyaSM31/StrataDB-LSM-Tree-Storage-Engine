@@ -19,7 +19,7 @@ Tick items off as they land; each one should arrive with its tests.
 - [x] Internal key format, comparator, MemTable and MemTable iterator
 - [x] WriteBatch (8-byte sequence, 4-byte count, then records)
 - [x] Log writer and reader, with truncation and bit-flip tests
-- [ ] Minimal `DBImpl`: write goes to WAL then memtable; Open replays the WAL
+- [x] Minimal `DBImpl`: write goes to WAL then memtable; Open replays the WAL
 - [x] Delete `tests/smoke_test.cc` and `src/version.cc` once real code replaces them
 
 ## Week 2 (9–15 Nov): SSTables and flush
