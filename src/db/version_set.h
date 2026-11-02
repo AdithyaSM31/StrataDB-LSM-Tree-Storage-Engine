@@ -18,6 +18,7 @@
 
 namespace strata {
 
+class Compaction;
 class TableCache;
 class VersionSet;
 
@@ -46,6 +47,13 @@ class Version {
 
   int NumLevelFiles(int level) const { return NumFiles(level); }
 
+  double compaction_score() const { return compaction_score_; }
+  int compaction_level() const { return compaction_level_; }
+
+#if STRATA_DEBUG_CHECKS
+  void CheckInvariants(const InternalKeyComparator* icmp) const;
+#endif
+
   std::string DebugString() const;
 
  private:
@@ -54,6 +62,8 @@ class Version {
   Version* next_ = this;
   Version* prev_ = this;
   int refs_ = 0;
+  double compaction_score_ = -1.0;
+  int compaction_level_ = -1;
   std::vector<FileMetaData*> files_[kNumLevels];
 };
 
@@ -105,13 +115,40 @@ class VersionSet {
   void AddLiveFiles(std::set<uint64_t>* live) const;
   int NumLevelFiles(int level) const { return current_->NumFiles(level); }
 
+  bool NeedsCompaction() const { return current_->compaction_score() >= 1.0; }
+
+  const std::string& compact_pointer(int level) const {
+    STRATA_DCHECK(level >= 0 && level < kNumLevels);
+    return compact_pointer_[level];
+  }
+
+  std::unique_ptr<Compaction> PickCompaction();
+  std::unique_ptr<Compaction> CompactRange(int level, const std::string* begin,
+                                           const std::string* end);
+
+  void GetRange(const std::vector<FileMetaData*>& inputs, std::string* smallest_uk,
+                std::string* largest_uk) const;
+  void GetRange2(const std::vector<FileMetaData*>& inputs1,
+                 const std::vector<FileMetaData*>& inputs2, std::string* smallest_uk,
+                 std::string* largest_uk) const;
+  void GetOverlappingInputs(int level, const std::string* user_begin, const std::string* user_end,
+                            std::vector<FileMetaData*>* inputs) const;
+  void GetOverlappingInputs(int level, const std::string& user_begin, const std::string& user_end,
+                            std::vector<FileMetaData*>* inputs) const {
+    GetOverlappingInputs(level, &user_begin, &user_end, inputs);
+  }
+
  private:
   class Builder;
   friend class Builder;
 
   void AppendVersion(Version* v);
+  void Finalize(Version* v);
+  uint64_t MaxBytesForLevel(int level) const;
+  void SetupOtherInputs(Compaction* c);
 
   Env* const env_;
+  const Options* const options_;
   const std::string dbname_;
   const InternalKeyComparator* const icmp_;
 
@@ -120,11 +157,64 @@ class VersionSet {
   uint64_t last_sequence_ = 0;
   uint64_t log_number_ = 0;
 
+  std::string compact_pointer_[kNumLevels];
+
   std::unique_ptr<WritableFile> descriptor_file_;
   std::unique_ptr<log::Writer> descriptor_log_;
 
   Version dummy_versions_;
   Version* current_ = nullptr;
+};
+
+class Compaction {
+ public:
+  Compaction(const Options* options, int level);
+  ~Compaction();
+
+  int level() const { return level_; }
+
+  Version* input_version() const { return input_version_; }
+  void SetInputVersion(Version* v);
+
+  size_t num_input_files(int which) const {
+    STRATA_DCHECK(which == 0 || which == 1);
+    return inputs_[which].size();
+  }
+  FileMetaData* input(int which, size_t i) const {
+    STRATA_DCHECK(which == 0 || which == 1);
+    STRATA_DCHECK(i < inputs_[which].size());
+    return inputs_[which][i];
+  }
+  const std::vector<FileMetaData*>& inputs(int which) const {
+    STRATA_DCHECK(which == 0 || which == 1);
+    return inputs_[which];
+  }
+
+  const std::vector<FileMetaData*>& grandparents() const { return grandparents_; }
+
+  uint64_t max_output_file_size() const { return max_output_file_size_; }
+
+  bool IsTrivialMove() const;
+  void AddInputDeletions(VersionEdit* edit);
+  bool IsBaseLevelForKey(std::string_view user_key);
+  bool ShouldStopBefore(std::string_view internal_key);
+  void ResetOutputOverlap();
+
+ private:
+  friend class VersionSet;
+
+  const Options* options_;
+  int level_;
+  uint64_t max_output_file_size_;
+  Version* input_version_ = nullptr;
+  const InternalKeyComparator* icmp_ = nullptr;
+
+  std::vector<FileMetaData*> inputs_[2];
+  std::vector<FileMetaData*> grandparents_;
+
+  size_t grandparent_index_ = 0;
+  bool seen_key_ = false;
+  uint64_t overlapped_bytes_ = 0;
 };
 
 }  // namespace strata

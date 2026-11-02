@@ -805,5 +805,343 @@ TEST_F(VersionSetTest, AddLiveFilesAndNumLevelFiles) {
   EXPECT_TRUE(live.count(11));
 }
 
+TEST_F(VersionSetTest, CompactionScores) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  options_.l0_compaction_trigger = 4;
+  options_.max_bytes_for_level_base = 10 * 1024 * 1024;  // 10 MB
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  EXPECT_DOUBLE_EQ(vset.current()->compaction_score(), 0.0);
+  EXPECT_EQ(vset.current()->compaction_level(), 0);
+  EXPECT_FALSE(vset.NeedsCompaction());
+
+  // Add 3 L0 files: score = 3 / 4 = 0.75 < 1.0
+  VersionEdit edit1;
+  edit1.AddFile(0, 10, 100, MakeInternalKey("a", 1, kTypeValue),
+                MakeInternalKey("b", 1, kTypeValue));
+  edit1.AddFile(0, 11, 100, MakeInternalKey("c", 2, kTypeValue),
+                MakeInternalKey("d", 2, kTypeValue));
+  edit1.AddFile(0, 12, 100, MakeInternalKey("e", 3, kTypeValue),
+                MakeInternalKey("f", 3, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit1).ok());
+
+  EXPECT_DOUBLE_EQ(vset.current()->compaction_score(), 0.75);
+  EXPECT_EQ(vset.current()->compaction_level(), 0);
+  EXPECT_FALSE(vset.NeedsCompaction());
+
+  // Add 4th L0 file: score = 4 / 4 = 1.0 -> NeedsCompaction is true!
+  VersionEdit edit2;
+  edit2.AddFile(0, 13, 100, MakeInternalKey("g", 4, kTypeValue),
+                MakeInternalKey("h", 4, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit2).ok());
+
+  EXPECT_DOUBLE_EQ(vset.current()->compaction_score(), 1.0);
+  EXPECT_EQ(vset.current()->compaction_level(), 0);
+  EXPECT_TRUE(vset.NeedsCompaction());
+
+  // Add 15 MB to L1 (base = 10 MB): score = 1.5 > 1.0, level 1 wins!
+  VersionEdit edit3;
+  edit3.AddFile(1, 20, 15 * 1024 * 1024, MakeInternalKey("a", 5, kTypeValue),
+                MakeInternalKey("z", 5, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit3).ok());
+
+  EXPECT_DOUBLE_EQ(vset.current()->compaction_score(), 1.5);
+  EXPECT_EQ(vset.current()->compaction_level(), 1);
+  EXPECT_TRUE(vset.NeedsCompaction());
+
+  // Files in level 6 (the last level) must NOT generate a score
+  VersionEdit edit4;
+  edit4.AddFile(6, 30, 500 * 1024 * 1024, MakeInternalKey("a", 6, kTypeValue),
+                MakeInternalKey("z", 6, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit4).ok());
+
+  EXPECT_DOUBLE_EQ(vset.current()->compaction_score(), 1.5);
+  EXPECT_EQ(vset.current()->compaction_level(), 1);
+}
+
+TEST_F(VersionSetTest, RoundRobinCompactPointerAndReopen) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  options_.max_bytes_for_level_base = 10 * 1024 * 1024;
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  // Create 3 non-overlapping files in Level 1 totalling 15 MB (> 10 MB base)
+  std::string k_a = MakeInternalKey("a", 1, kTypeValue);
+  std::string k_b = MakeInternalKey("b", 1, kTypeValue);
+  std::string k_c = MakeInternalKey("c", 1, kTypeValue);
+  std::string k_d = MakeInternalKey("d", 1, kTypeValue);
+  std::string k_e = MakeInternalKey("e", 1, kTypeValue);
+  std::string k_f = MakeInternalKey("f", 1, kTypeValue);
+
+  VersionEdit edit;
+  edit.AddFile(1, 10, 5 * 1024 * 1024, k_a, k_b);
+  edit.AddFile(1, 11, 5 * 1024 * 1024, k_c, k_d);
+  edit.AddFile(1, 12, 5 * 1024 * 1024, k_e, k_f);
+  ASSERT_TRUE(vset.LogAndApply(&edit).ok());
+
+  EXPECT_TRUE(vset.NeedsCompaction());
+  EXPECT_EQ(vset.current()->compaction_level(), 1);
+
+  // 1. Initial compact pointer is empty -> picks first file (file 10, "a".."b")
+  auto c1 = vset.PickCompaction();
+  ASSERT_NE(c1, nullptr);
+  EXPECT_EQ(c1->level(), 1);
+  ASSERT_EQ(c1->num_input_files(0), 1u);
+  EXPECT_EQ(c1->input(0, 0)->number, 10u);
+
+  // Set compact pointer to file 10's largest key ("b")
+  VersionEdit cp_edit1;
+  cp_edit1.SetCompactPointer(1, k_b);
+  ASSERT_TRUE(vset.LogAndApply(&cp_edit1).ok());
+  EXPECT_EQ(vset.compact_pointer(1), k_b);
+
+  // 2. Next compaction should pick file 11 ("c".."d")
+  auto c2 = vset.PickCompaction();
+  ASSERT_NE(c2, nullptr);
+  ASSERT_EQ(c2->num_input_files(0), 1u);
+  EXPECT_EQ(c2->input(0, 0)->number, 11u);
+
+  // Set compact pointer to file 11's largest key ("d")
+  VersionEdit cp_edit2;
+  cp_edit2.SetCompactPointer(1, k_d);
+  ASSERT_TRUE(vset.LogAndApply(&cp_edit2).ok());
+  EXPECT_EQ(vset.compact_pointer(1), k_d);
+
+  // 3. Next compaction should pick file 12 ("e".."f")
+  auto c3 = vset.PickCompaction();
+  ASSERT_NE(c3, nullptr);
+  ASSERT_EQ(c3->num_input_files(0), 1u);
+  EXPECT_EQ(c3->input(0, 0)->number, 12u);
+
+  // Set compact pointer to file 12's largest key ("f")
+  VersionEdit cp_edit3;
+  cp_edit3.SetCompactPointer(1, k_f);
+  ASSERT_TRUE(vset.LogAndApply(&cp_edit3).ok());
+  EXPECT_EQ(vset.compact_pointer(1), k_f);
+
+  // 4. All files in Level 1 have largest <= "f". Should wrap around to file 10!
+  auto c4 = vset.PickCompaction();
+  ASSERT_NE(c4, nullptr);
+  ASSERT_EQ(c4->num_input_files(0), 1u);
+  EXPECT_EQ(c4->input(0, 0)->number, 10u);
+
+  // 5. Verify compact pointer survives a database reopen (MANIFEST recovery)
+  VersionSet vset2(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset2.Recover().ok());
+  EXPECT_EQ(vset2.compact_pointer(1), k_f);
+
+  auto c5 = vset2.PickCompaction();
+  ASSERT_NE(c5, nullptr);
+  ASSERT_EQ(c5->num_input_files(0), 1u);
+  EXPECT_EQ(c5->input(0, 0)->number, 10u);  // Wrapped around after reopen too
+}
+
+TEST_F(VersionSetTest, L0OverlapExpansionChain) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  options_.l0_compaction_trigger = 4;
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  // 4 L0 files:
+  // F1: "c".."e" (file 13 - newest file)
+  // F2: "d".."g" (file 12) - directly overlaps F1
+  // F3: "f".."h" (file 11) - directly overlaps F2, chain-widens from F1
+  // F4: "x".."z" (file 10) - isolated, does not overlap
+  VersionEdit edit;
+  edit.AddFile(0, 13, 100, MakeInternalKey("c", 1, kTypeValue),
+               MakeInternalKey("e", 1, kTypeValue));
+  edit.AddFile(0, 12, 100, MakeInternalKey("d", 2, kTypeValue),
+               MakeInternalKey("g", 2, kTypeValue));
+  edit.AddFile(0, 11, 100, MakeInternalKey("f", 3, kTypeValue),
+               MakeInternalKey("h", 3, kTypeValue));
+  edit.AddFile(0, 10, 100, MakeInternalKey("x", 4, kTypeValue),
+               MakeInternalKey("z", 4, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit).ok());
+
+  EXPECT_TRUE(vset.NeedsCompaction());
+  EXPECT_EQ(vset.current()->compaction_level(), 0);
+
+  auto c = vset.PickCompaction();
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->level(), 0);
+
+  // F1 (file 13) pulled in F2 (file 12) which pulled in F3 (file 11). F4 (file 10) must NOT be
+  // included.
+  EXPECT_EQ(c->num_input_files(0), 3u);
+  std::set<uint64_t> numbers;
+  for (size_t i = 0; i < c->num_input_files(0); ++i) {
+    numbers.insert(c->input(0, i)->number);
+  }
+  EXPECT_TRUE(numbers.count(13));
+  EXPECT_TRUE(numbers.count(12));
+  EXPECT_TRUE(numbers.count(11));
+  EXPECT_FALSE(numbers.count(10));
+}
+
+TEST_F(VersionSetTest, TrivialMoveDetection) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  options_.max_file_size = 2 * 1024 * 1024;  // 2 MB
+  options_.l0_compaction_trigger = 4;
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  // Case 1: 1 file in L0, no overlap in L1, grandparent overlap in L2 <= 10 * max_file_size (20 MB)
+  VersionEdit edit1;
+  edit1.AddFile(0, 10, 1000, MakeInternalKey("c", 1, kTypeValue),
+                MakeInternalKey("d", 1, kTypeValue));
+  // Grandparent in L2 with 5 MB
+  edit1.AddFile(2, 20, 5 * 1024 * 1024, MakeInternalKey("b", 1, kTypeValue),
+                MakeInternalKey("e", 1, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit1).ok());
+
+  // Force compaction on level 0 via CompactRange
+  auto c1 = vset.CompactRange(0, nullptr, nullptr);
+  ASSERT_NE(c1, nullptr);
+  EXPECT_EQ(c1->num_input_files(0), 1u);
+  EXPECT_EQ(c1->num_input_files(1), 0u);
+  EXPECT_EQ(c1->grandparents().size(), 1u);
+  EXPECT_TRUE(c1->IsTrivialMove());
+
+  // Case 2: Overlapping file in L1 -> not a trivial move
+  VersionEdit edit2;
+  edit2.AddFile(1, 15, 1000, MakeInternalKey("c5", 1, kTypeValue),
+                MakeInternalKey("c6", 1, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit2).ok());
+
+  auto c2 = vset.CompactRange(0, nullptr, nullptr);
+  ASSERT_NE(c2, nullptr);
+  EXPECT_EQ(c2->num_input_files(1), 1u);
+  EXPECT_FALSE(c2->IsTrivialMove());
+
+  // Remove the overlapping L1 file
+  VersionEdit edit3;
+  edit3.RemoveFile(1, 15);
+  ASSERT_TRUE(vset.LogAndApply(&edit3).ok());
+
+  // Case 3: Grandparent in L2 has 25 MB (> 10 * 2 MB = 20 MB) -> not a trivial move
+  VersionEdit edit4;
+  edit4.RemoveFile(2, 20);
+  edit4.AddFile(2, 21, 25 * 1024 * 1024, MakeInternalKey("b", 1, kTypeValue),
+                MakeInternalKey("e", 1, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit4).ok());
+
+  auto c3 = vset.CompactRange(0, nullptr, nullptr);
+  ASSERT_NE(c3, nullptr);
+  EXPECT_FALSE(c3->IsTrivialMove());
+
+  // Case 4: 2 input files in L0 -> not a trivial move
+  VersionEdit edit5;
+  edit5.RemoveFile(2, 21);
+  edit5.AddFile(2, 20, 5 * 1024 * 1024, MakeInternalKey("b", 1, kTypeValue),
+                MakeInternalKey("e", 1, kTypeValue));
+  edit5.AddFile(0, 11, 1000, MakeInternalKey("c1", 1, kTypeValue),
+                MakeInternalKey("d1", 1, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit5).ok());
+
+  auto c4 = vset.CompactRange(0, nullptr, nullptr);
+  ASSERT_NE(c4, nullptr);
+  EXPECT_EQ(c4->num_input_files(0), 2u);
+  EXPECT_FALSE(c4->IsTrivialMove());
+}
+
+TEST_F(VersionSetTest, OptionalExpansion) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  options_.max_file_size = 2 * 1024 * 1024;  // 2 MB
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  // Level 1: F1 ("c".."d", 1 MB) and F2 ("e".."f5", 1 MB)
+  // Level 2: F3 ("c".."f", 2 MB)
+  // When compacting L1 for range "c".."d":
+  // inputs[0] initially is {F1}.
+  // Overlapping in L2 is F3 ("c".."f").
+  // Combined range is "c".."f".
+  // Expanding in L1 gives {F1, F2}.
+  // Overlapping in L2 for {F1, F2} is still just {F3} (no additional L2 files).
+  // Total bytes: 1 MB + 1 MB + 2 MB = 4 MB <= 25 * 2 MB = 50 MB.
+  // Optional expansion succeeds and includes F2!
+  VersionEdit edit;
+  edit.AddFile(1, 10, 1024 * 1024, MakeInternalKey("c", 1, kTypeValue),
+               MakeInternalKey("d", 1, kTypeValue));
+  edit.AddFile(1, 11, 1024 * 1024, MakeInternalKey("e", 1, kTypeValue),
+               MakeInternalKey("f5", 1, kTypeValue));
+  edit.AddFile(2, 20, 2 * 1024 * 1024, MakeInternalKey("c", 1, kTypeValue),
+               MakeInternalKey("f", 1, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit).ok());
+
+  std::string begin = "c";
+  std::string end = "d";
+  auto c = vset.CompactRange(1, &begin, &end);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->num_input_files(0), 2u);
+  EXPECT_EQ(c->input(0, 0)->number, 10u);
+  EXPECT_EQ(c->input(0, 1)->number, 11u);
+  EXPECT_EQ(c->num_input_files(1), 1u);
+  EXPECT_EQ(c->input(1, 0)->number, 20u);
+
+  // Counter-case: Add F4 ("f1".."g") to Level 2.
+  // Expanding to F2 ("e".."f5") in L1 would now pull in F4 ("f1".."g") in L2 because "f1" <= "f5".
+  // Optional expansion must be rejected, keeping only F1 in inputs[0]!
+  VersionEdit edit2;
+  edit2.AddFile(2, 21, 1024 * 1024, MakeInternalKey("f1", 1, kTypeValue),
+                MakeInternalKey("g", 1, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit2).ok());
+
+  auto c2 = vset.CompactRange(1, &begin, &end);
+  ASSERT_NE(c2, nullptr);
+  EXPECT_EQ(c2->num_input_files(0), 1u);
+  EXPECT_EQ(c2->input(0, 0)->number, 10u);
+}
+
+TEST_F(VersionSetTest, CompactionBaseLevelForKeyAndShouldStopBefore) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  options_.max_file_size = 2 * 1024 * 1024;  // 2 MB
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  // Setup:
+  // L1: file 10 ("b".."f")
+  // L3: file 30 ("d".."e")
+  // Compaction from L1 to L2:
+  // Base level for key: checks L3 downward.
+  // "c" is not in L3 -> IsBaseLevelForKey("c") is true
+  // "d5" is in L3 ("d".."e") -> IsBaseLevelForKey("d5") is false
+  // Grandparents from L3: file 30 ("d".."e", size 25 MB > 10 * 2 MB = 20 MB)
+  VersionEdit edit;
+  edit.AddFile(1, 10, 1000, MakeInternalKey("b", 1, kTypeValue),
+               MakeInternalKey("f", 1, kTypeValue));
+  edit.AddFile(3, 30, 25 * 1024 * 1024, MakeInternalKey("d", 1, kTypeValue),
+               MakeInternalKey("e", 1, kTypeValue));
+  ASSERT_TRUE(vset.LogAndApply(&edit).ok());
+
+  auto c = vset.CompactRange(1, nullptr, nullptr);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->level(), 1);
+
+  EXPECT_TRUE(c->IsBaseLevelForKey("c"));
+  EXPECT_FALSE(c->IsBaseLevelForKey("d5"));
+  EXPECT_TRUE(c->IsBaseLevelForKey("z"));
+
+  // Grandparents overlap checking for ShouldStopBefore:
+  // GP file 30 covers "d".."e" and has 25 MB > 20 MB limit.
+  // Before key reaches file 30:
+  EXPECT_FALSE(c->ShouldStopBefore(MakeInternalKey("b", 1, kTypeValue)));
+  // After key passes file 30's largest key ("e"):
+  EXPECT_TRUE(c->ShouldStopBefore(MakeInternalKey("f", 1, kTypeValue)));
+}
+
 }  // namespace
 }  // namespace strata

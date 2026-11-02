@@ -39,7 +39,7 @@ Tick items off as they land; each one should arrive with its tests.
 
 **Milestone:** a 10M-key `fillrandom` finishes with L0 under the stop trigger, and the model test passes.
 
-- [ ] Level scores, compact pointers, input selection and expansion, trivial move
+- [x] Level scores, compact pointers, input selection and expansion, trivial move
 - [ ] Compaction merge loop with drop rules for old versions and tombstones
 - [ ] Output splitting by size and by grandparent overlap
 - [ ] Version refcounting and obsolete file deletion

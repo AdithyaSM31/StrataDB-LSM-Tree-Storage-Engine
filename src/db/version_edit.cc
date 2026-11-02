@@ -22,6 +22,7 @@ enum Tag : uint8_t {
   kLastSequence = 4,
   kDeletedFile = 5,
   kNewFile = 6,
+  kCompactPointer = 7,
 };
 
 }  // namespace
@@ -31,12 +32,18 @@ void VersionEdit::Clear() {
   log_number_ = 0;
   next_file_number_ = 0;
   last_sequence_ = 0;
+  compact_pointers_.clear();
   deleted_files_.clear();
   new_files_.clear();
   has_comparator_ = false;
   has_log_number_ = false;
   has_next_file_number_ = false;
   has_last_sequence_ = false;
+}
+
+void VersionEdit::SetCompactPointer(int level, std::string_view key) {
+  STRATA_DCHECK(level >= 0 && level < kNumLevels);
+  compact_pointers_.emplace_back(level, std::string(key));
 }
 
 void VersionEdit::SetComparatorName(std::string_view name) {
@@ -96,6 +103,11 @@ void VersionEdit::EncodeTo(std::string* dst) const {
     PutVarint32(dst, kDeletedFile);
     PutVarint32(dst, static_cast<uint32_t>(level));
     PutVarint64(dst, number);
+  }
+  for (const auto& [level, key] : compact_pointers_) {
+    PutVarint32(dst, kCompactPointer);
+    PutVarint32(dst, static_cast<uint32_t>(level));
+    PutLengthPrefixed(dst, key);
   }
   for (const auto& [level, f] : new_files_) {
     PutVarint32(dst, kNewFile);
@@ -196,6 +208,22 @@ Status VersionEdit::DecodeFrom(std::string_view src) {
         new_files_.emplace_back(static_cast<int>(level), std::move(f));
         break;
       }
+      case kCompactPointer: {
+        uint32_t level = 0;
+        std::string_view key;
+        if (!GetVarint32(&input, &level) || !GetLengthPrefixed(&input, &key)) {
+          return Status::Corruption("VersionEdit: truncated compact pointer");
+        }
+        if (level >= static_cast<uint32_t>(kNumLevels)) {
+          return Status::Corruption("VersionEdit: level >= kNumLevels in compact pointer");
+        }
+        ParsedInternalKey parsed_key;
+        if (!ParseInternalKey(key, &parsed_key)) {
+          return Status::Corruption("VersionEdit: invalid compact pointer internal key");
+        }
+        compact_pointers_.emplace_back(static_cast<int>(level), std::string(key));
+        break;
+      }
       default:
         return Status::Corruption("VersionEdit: unknown tag " + std::to_string(tag));
     }
@@ -217,6 +245,9 @@ std::string VersionEdit::DebugString() const {
   }
   if (has_last_sequence_) {
     ss << " last_seq: " << last_sequence_;
+  }
+  for (const auto& [level, key] : compact_pointers_) {
+    ss << " ptr(L" << level << ", " << key << ")";
   }
   for (const auto& [level, num] : deleted_files_) {
     ss << " del(L" << level << ", " << num << ")";

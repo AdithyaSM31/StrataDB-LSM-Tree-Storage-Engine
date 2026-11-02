@@ -218,5 +218,40 @@ TEST(VersionEditTest, LastSequenceAbove56BitsReturnsCorruption) {
   EXPECT_EQ(edit.last_sequence(), kMaxSequenceNumber);
 }
 
+TEST(VersionEditTest, CompactPointerRoundTripAndErrors) {
+  VersionEdit edit;
+  std::string cp0 = MakeInternalKey("key_0", 10, kTypeValue);
+  std::string cp1 = MakeInternalKey("key_1", 20, kTypeValue);
+  edit.SetCompactPointer(0, cp0);
+  edit.SetCompactPointer(1, cp1);
+
+  std::string encoded;
+  edit.EncodeTo(&encoded);
+
+  VersionEdit decoded;
+  ASSERT_TRUE(decoded.DecodeFrom(encoded).ok());
+  ASSERT_EQ(decoded.compact_pointers().size(), 2u);
+  EXPECT_EQ(decoded.compact_pointers()[0].first, 0);
+  EXPECT_EQ(decoded.compact_pointers()[0].second, cp0);
+  EXPECT_EQ(decoded.compact_pointers()[1].first, 1);
+  EXPECT_EQ(decoded.compact_pointers()[1].second, cp1);
+
+  // Invalid level >= kNumLevels
+  std::string bad_level_buf;
+  PutVarint32(&bad_level_buf, 7);           // kCompactPointer
+  PutVarint32(&bad_level_buf, kNumLevels);  // level >= kNumLevels
+  PutLengthPrefixed(&bad_level_buf, cp0);
+  VersionEdit bad_level_edit;
+  EXPECT_TRUE(bad_level_edit.DecodeFrom(bad_level_buf).IsCorruption());
+
+  // Invalid internal key (too short or bad type)
+  std::string bad_key_buf;
+  PutVarint32(&bad_key_buf, 7);
+  PutVarint32(&bad_key_buf, 1);
+  PutLengthPrefixed(&bad_key_buf, "short");
+  VersionEdit bad_key_edit;
+  EXPECT_TRUE(bad_key_edit.DecodeFrom(bad_key_buf).IsCorruption());
+}
+
 }  // namespace
 }  // namespace strata

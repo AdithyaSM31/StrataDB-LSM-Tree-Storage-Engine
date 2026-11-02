@@ -33,6 +33,7 @@ class VersionEdit {
   void SetLogNumber(uint64_t n);
   void SetNextFile(uint64_t n);
   void SetLastSequence(SequenceNumber s);
+  void SetCompactPointer(int level, std::string_view key);
   void AddFile(int level, uint64_t number, uint64_t size, std::string_view smallest,
                std::string_view largest);
   void RemoveFile(int level, uint64_t number);
@@ -52,6 +53,9 @@ class VersionEdit {
   bool has_last_sequence() const { return has_last_sequence_; }
   SequenceNumber last_sequence() const { return last_sequence_; }
 
+  const std::vector<std::pair<int, std::string>>& compact_pointers() const {
+    return compact_pointers_;
+  }
   const std::vector<std::pair<int, uint64_t>>& deleted_files() const { return deleted_files_; }
   const std::vector<std::pair<int, FileMetaData>>& new_files() const { return new_files_; }
 
@@ -62,6 +66,7 @@ class VersionEdit {
   uint64_t log_number_ = 0;
   uint64_t next_file_number_ = 0;
   SequenceNumber last_sequence_ = 0;
+  std::vector<std::pair<int, std::string>> compact_pointers_;
   std::vector<std::pair<int, uint64_t>> deleted_files_;
   std::vector<std::pair<int, FileMetaData>> new_files_;
 
