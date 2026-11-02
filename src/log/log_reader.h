@@ -45,6 +45,11 @@ class Reader {
   std::string_view buffer_;                // unread part of the current block
   bool eof_ = false;                       // the last file read returned less than a full block
   bool in_fragmented_record_ = false;
+  // Zero-filled bytes skipped since the last valid piece. Our writer never
+  // pre-fills files with zeros, so zeros followed by a valid piece mean data
+  // was lost in the middle of the log (a hole) and are reported; zeros
+  // followed only by the end of the file are a torn tail and stay silent.
+  size_t pending_zero_bytes_ = 0;
 };
 
 }  // namespace strata::log

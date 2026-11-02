@@ -92,6 +92,11 @@ class StringSource : public SequentialFile {
 };
 
 // Test Double: Reporter that collects dropped bytes and corruption statuses.
+// Flip one bit of s[byte], XOR-ing on uint8_t to avoid an int -> char narrowing.
+void FlipBit(std::string& s, size_t byte, size_t bit) {
+  s[byte] = static_cast<char>(static_cast<uint8_t>(s[byte]) ^ (1U << bit));
+}
+
 class TestReporter : public Reader::Reporter {
  public:
   struct Report {
@@ -178,7 +183,7 @@ TEST(LogTest, ExactlyFillsBlock) {
 
 TEST(LogTest, MultiBlockRecord100KB) {
   // 100 KB record spanning 4 blocks.
-  const std::string huge(100 * 1024, 'M');
+  const std::string huge(size_t{100} * 1024, 'M');
 
   StringSink sink;
   Writer writer(&sink);
@@ -352,7 +357,7 @@ TEST(LogTest, BitFlipsReportCorruptionAndNeverReturnDamagedRecord) {
   for (size_t byte_idx = r1_start; byte_idx < r1_end; ++byte_idx) {
     for (int bit = 0; bit < 8; ++bit) {
       std::string corrupted = original;
-      corrupted[byte_idx] ^= static_cast<char>(1 << bit);
+      FlipBit(corrupted, byte_idx, bit);
 
       TestReporter reporter;
       auto records = ReadAllRecords(corrupted, &reporter);
@@ -520,6 +525,71 @@ TEST(LogTest, ZeroFilledTail) {
   ASSERT_EQ(records.size(), 2u);
   EXPECT_EQ(records[0], "hello");
   EXPECT_EQ(records[1], "world");
+  EXPECT_TRUE(reporter.reports.empty());
+}
+
+TEST(LogTest, ZeroedMiddleBlockIsReportedAsHole) {
+  // One record exactly fills each of three blocks. Zeroing block 1 simulates
+  // data that never reached the disk while later data did. Returning A and C
+  // silently would leave a hole the DB could not detect, so the reader must
+  // report it.
+  StringSink sink;
+  Writer writer(&sink);
+  const std::string a(kBlockSize - kHeaderSize, 'A');
+  const std::string b(kBlockSize - kHeaderSize, 'B');
+  const std::string c(kBlockSize - kHeaderSize, 'C');
+  ASSERT_TRUE(writer.AddRecord(a).ok());
+  ASSERT_TRUE(writer.AddRecord(b).ok());
+  ASSERT_TRUE(writer.AddRecord(c).ok());
+  std::string log_data = sink.contents();
+  ASSERT_EQ(log_data.size(), 3 * kBlockSize);
+  std::fill(log_data.begin() + kBlockSize, log_data.begin() + 2 * kBlockSize, '\0');
+
+  TestReporter reporter;
+  auto records = ReadAllRecords(log_data, &reporter);
+  ASSERT_EQ(records.size(), 2u);
+  EXPECT_EQ(records[0], a);
+  EXPECT_EQ(records[1], c);
+  ASSERT_EQ(reporter.reports.size(), 1u);
+  EXPECT_TRUE(reporter.reports[0].status.IsCorruption());
+  EXPECT_EQ(reporter.reports[0].bytes, kBlockSize);
+}
+
+TEST(LogTest, SeveralZeroedBlocksBeforeValidRecordReportedOnce) {
+  StringSink sink;
+  Writer writer(&sink);
+  const std::string rec(kBlockSize - kHeaderSize, 'R');
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(writer.AddRecord(rec).ok());
+  }
+  std::string log_data = sink.contents();
+  std::fill(log_data.begin() + kBlockSize, log_data.begin() + 3 * kBlockSize, '\0');
+
+  TestReporter reporter;
+  auto records = ReadAllRecords(log_data, &reporter);
+  EXPECT_EQ(records.size(), 2u);
+  ASSERT_EQ(reporter.reports.size(), 1u);
+  EXPECT_EQ(reporter.reports[0].bytes, 2 * kBlockSize);
+}
+
+TEST(LogTest, FragmentedRecordCutOffByZeroFilledTailIsSilent) {
+  // The writer finished the First piece of a large record, then crashed; the
+  // rest of the file is zeros. That is a torn tail: the earlier record comes
+  // back, the partial one does not, and nothing is reported.
+  StringSink sink;
+  Writer writer(&sink);
+  ASSERT_TRUE(writer.AddRecord("before").ok());
+  const size_t big_start = sink.contents().size();
+  ASSERT_TRUE(writer.AddRecord(std::string(3 * kBlockSize, 'X')).ok());
+  std::string log_data = sink.contents();
+  // Keep the first block (holding "before" and the First piece); zero the rest.
+  ASSERT_LT(big_start, kBlockSize);
+  std::fill(log_data.begin() + kBlockSize, log_data.end(), '\0');
+
+  TestReporter reporter;
+  auto records = ReadAllRecords(log_data, &reporter);
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0], "before");
   EXPECT_TRUE(reporter.reports.empty());
 }
 

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -17,7 +18,7 @@ namespace {
 class RecordingHandler : public WriteBatch::Handler {
  public:
   struct Operation {
-    enum Type { kPut, kDelete };
+    enum Type : uint8_t { kPut, kDelete };
     Type type;
     std::string key;
     std::string value;

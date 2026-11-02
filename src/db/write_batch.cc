@@ -96,12 +96,15 @@ Status WriteBatch::Iterate(Handler* handler) const {
     if (tag == static_cast<uint8_t>(kTypeValue)) {
       std::string_view key;
       std::string_view value;
-      GetLengthPrefixed(&input, &key);
-      GetLengthPrefixed(&input, &value);
+      // The first pass already validated every record; the DCHECK keeps the
+      // two passes from drifting apart.
+      const bool ok = GetLengthPrefixed(&input, &key) && GetLengthPrefixed(&input, &value);
+      STRATA_DCHECK(ok);
       handler->Put(key, value);
     } else {
       std::string_view key;
-      GetLengthPrefixed(&input, &key);
+      const bool ok = GetLengthPrefixed(&input, &key);
+      STRATA_DCHECK(ok);
       handler->Delete(key);
     }
   }

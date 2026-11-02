@@ -13,7 +13,7 @@
 namespace strata::log {
 
 namespace {
-enum {
+enum : uint8_t {
   kEof = kMaxRecordType + 1,
   kBadRecord = kMaxRecordType + 2,
 };
@@ -75,8 +75,11 @@ int Reader::ReadPhysicalRecord(std::string_view* result) {
     }
 
     if (type == kZeroType && length == 0) {
+      // Zero-filled space: skip the rest of the block and keep reading. Whether
+      // it is a torn tail or a hole is only known once we see what follows.
+      pending_zero_bytes_ += buffer_.size();
       buffer_ = {};
-      return kBadRecord;  // skip it, report nothing
+      continue;
     }
 
     if (checksum_) {
@@ -88,6 +91,13 @@ int Reader::ReadPhysicalRecord(std::string_view* result) {
         ReportCorruption(drop, Status::Corruption("checksum mismatch"));
         return kBadRecord;
       }
+    }
+
+    if (pending_zero_bytes_ > 0) {
+      // A valid piece after zeros: the zeros were lost data, not a torn tail.
+      ReportCorruption(pending_zero_bytes_,
+                       Status::Corruption("valid record after zero-filled region"));
+      pending_zero_bytes_ = 0;
     }
 
     *result = std::string_view(buffer_.data() + kHeaderSize, length);
