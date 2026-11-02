@@ -26,6 +26,10 @@ class TableCache {
   // Opens (or reuses) the table for this file number.
   Status FindTable(uint64_t number, uint64_t file_size, std::shared_ptr<Table>* table);
 
+  // Opens (or reuses) the table and returns an iterator over its contents.
+  std::unique_ptr<Iterator> NewIterator(uint64_t number, uint64_t file_size,
+                                        Table** tableptr = nullptr);
+
   // Evicts the table for this file number when the file is deleted.
   void Evict(uint64_t number);
 

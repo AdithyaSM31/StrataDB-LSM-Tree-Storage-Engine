@@ -1,6 +1,7 @@
 #ifndef STRATA_DB_DB_IMPL_H_
 #define STRATA_DB_DB_IMPL_H_
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -95,14 +96,33 @@ class DBImpl : public DB {
 
   Status Recover();  // called by DB::Open
 
+  // Test helpers
+  void TEST_CompactRange(int level, const std::string* begin, const std::string* end);
+  int TEST_NumLevelFiles(int level);
+
  private:
   Status NewDB();
   Status RecoverLogFile(uint64_t number, SequenceNumber* max_sequence, bool* corrupted);
   Status MakeRoomForWrite(std::unique_lock<std::mutex>* lock);
   Status SwitchMemTable();
   void BackgroundThreadMain();
+  bool HasBackgroundWork() const;
   void CompactMemTable();
   void RemoveObsoleteFiles();
+
+  struct CompactionState;
+  struct ManualCompaction {
+    int level = 0;
+    bool done = false;
+    const std::string* begin = nullptr;
+    const std::string* end = nullptr;
+  };
+
+  Status DoCompactionWork(CompactionState* compact, std::unique_lock<std::mutex>* lock);
+  Status OpenCompactionOutputFile(CompactionState* compact);
+  Status FinishCompactionOutputFile(CompactionState* compact);
+  Status InstallCompactionResults(CompactionState* compact);
+  std::unique_ptr<Iterator> MakeInputIterator(Compaction* c);
 
   Env* const env_;
   const Options options_;
@@ -125,8 +145,10 @@ class DBImpl : public DB {
 
   std::thread background_thread_;
   std::condition_variable background_work_cv_;  // "there is work" / "work finished"
-  bool shutting_down_ = false;                  // guarded by mutex_
-  std::set<uint64_t> pending_outputs_;          // table files being written: never delete these
+  std::atomic<bool> shutting_down_{false};
+  std::atomic<bool> has_imm_{false};
+  std::set<uint64_t> pending_outputs_;             // table files being written: never delete these
+  ManualCompaction* manual_compaction_ = nullptr;  // guarded by mutex_
 };
 
 }  // namespace strata

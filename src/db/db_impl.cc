@@ -23,7 +23,11 @@
 #include "strata/env.h"
 #include "strata/options.h"
 #include "strata/status.h"
+#include "table/merger.h"
+#include "table/table_builder.h"
+#include "table/two_level_iterator.h"
 #include "util/check.h"
+#include "util/coding.h"
 
 namespace strata {
 
@@ -55,7 +59,88 @@ Options SanitizeOptions(const Options& src) {
   return result;
 }
 
+class LevelFileIndexIterator : public Iterator {
+ public:
+  LevelFileIndexIterator(const InternalKeyComparator* icmp, std::vector<FileMetaData*> files)
+      : icmp_(icmp), files_(std::move(files)), index_(files_.size()) {}
+
+  ~LevelFileIndexIterator() override = default;
+
+  bool Valid() const override { return index_ < files_.size(); }
+
+  void SeekToFirst() override { index_ = files_.empty() ? 0 : 0; }
+
+  void SeekToLast() override { index_ = files_.empty() ? 0 : files_.size() - 1; }
+
+  void Seek(std::string_view target) override {
+    auto it = std::lower_bound(files_.begin(), files_.end(), target,
+                               [this](const FileMetaData* f, std::string_view t) {
+                                 return icmp_->Compare(f->largest, t) < 0;
+                               });
+    index_ = static_cast<size_t>(it - files_.begin());
+  }
+
+  void Next() override {
+    STRATA_DCHECK(Valid());
+    ++index_;
+  }
+
+  void Prev() override {
+    STRATA_DCHECK(Valid());
+    if (index_ == 0) {
+      index_ = files_.size();
+    } else {
+      --index_;
+    }
+  }
+
+  std::string_view key() const override {
+    STRATA_DCHECK(Valid());
+    return files_[index_]->largest;
+  }
+
+  std::string_view value() const override {
+    STRATA_DCHECK(Valid());
+    value_buf_.clear();
+    PutVarint64(&value_buf_, files_[index_]->number);
+    PutVarint64(&value_buf_, files_[index_]->file_size);
+    return value_buf_;
+  }
+
+  Status status() const override { return Status::OK(); }
+
+ private:
+  const InternalKeyComparator* icmp_;
+  const std::vector<FileMetaData*> files_;
+  size_t index_;
+  mutable std::string value_buf_;
+};
+
 }  // namespace
+
+struct DBImpl::CompactionState {
+  Compaction* const compaction;
+  SequenceNumber smallest_snapshot;
+
+  struct Output {
+    uint64_t number = 0;
+    uint64_t file_size = 0;
+    std::string smallest;
+    std::string largest;
+  };
+  std::vector<Output> outputs;
+
+  std::unique_ptr<WritableFile> outfile;
+  std::unique_ptr<TableBuilder> builder;
+  uint64_t total_bytes = 0;
+
+  CompactionState(Compaction* c, SequenceNumber snap) : compaction(c), smallest_snapshot(snap) {}
+
+  Output* current_output() {
+    STRATA_DCHECK(!outputs.empty());
+    return &outputs.back();
+  }
+};
 
 DBImpl::DBImpl(const Options& options, const std::string& dbname)
     : env_(options.env == nullptr ? Env::Default() : options.env),
@@ -69,7 +154,7 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
 DBImpl::~DBImpl() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    shutting_down_ = true;
+    shutting_down_.store(true, std::memory_order_release);
     background_work_cv_.notify_all();
   }
   if (background_thread_.joinable()) {
@@ -387,6 +472,7 @@ Status DBImpl::SwitchMemTable() {
   log_ = std::make_unique<log::Writer>(logfile_.get());
   logfile_number_ = new_number;
   imm_ = mem_;
+  has_imm_.store(true, std::memory_order_release);
   mem_ = new MemTable(icmp_);
   mem_->Ref();
   background_work_cv_.notify_all();
@@ -394,14 +480,27 @@ Status DBImpl::SwitchMemTable() {
 }
 
 Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock) {
+  bool allow_delay = true;
   while (true) {
     if (!bg_error_.ok()) {
       return bg_error_;
+    }
+    if (allow_delay && versions_->NumLevelFiles(0) >= options_.l0_slowdown_trigger) {
+      // At 8 or more L0 files: release lock, sleep 1 ms, retake lock. Do once per write.
+      allow_delay = false;
+      lock->unlock();
+      env_->SleepForMicroseconds(1000);
+      lock->lock();
+      continue;
     }
     if (mem_->IsEmpty() || mem_->ApproximateMemoryUsage() <= options_.write_buffer_size) {
       return Status::OK();
     }
     if (imm_ != nullptr) {
+      background_work_cv_.wait(*lock);
+      continue;
+    }
+    if (versions_->NumLevelFiles(0) >= options_.l0_stop_trigger) {
       background_work_cv_.wait(*lock);
       continue;
     }
@@ -412,16 +511,62 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock) {
   }
 }
 
+bool DBImpl::HasBackgroundWork() const {
+  return shutting_down_.load(std::memory_order_acquire) ||
+         (bg_error_.ok() &&
+          (imm_ != nullptr || manual_compaction_ != nullptr || versions_->NeedsCompaction()));
+}
+
 void DBImpl::BackgroundThreadMain() {
   std::unique_lock<std::mutex> lock(mutex_);
   while (true) {
-    background_work_cv_.wait(
-        lock, [this] { return shutting_down_ || (imm_ != nullptr && bg_error_.ok()); });
+    background_work_cv_.wait(lock, [this] { return HasBackgroundWork(); });
     if (shutting_down_) {
       break;
     }
-    CompactMemTable();
-    background_work_cv_.notify_all();
+    if (!bg_error_.ok()) {
+      break;
+    }
+
+    // Priority 1: Flush imm_
+    if (imm_ != nullptr) {
+      CompactMemTable();
+      background_work_cv_.notify_all();
+      continue;
+    }
+
+    // Priority 2: Manual compaction
+    if (manual_compaction_ != nullptr) {
+      ManualCompaction* m = manual_compaction_;
+      std::unique_ptr<Compaction> c = versions_->CompactRange(m->level, m->begin, m->end);
+      if (c == nullptr) {
+        m->done = true;
+      } else {
+        CompactionState compact(c.get(), snapshots_.empty()
+                                             ? versions_->LastSequence()
+                                             : snapshots_.oldest()->sequence_number());
+        Status s = DoCompactionWork(&compact, &lock);
+        (void)s;
+        m->done = true;
+      }
+      manual_compaction_ = nullptr;
+      background_work_cv_.notify_all();
+      continue;
+    }
+
+    // Priority 3: Automatic compaction
+    if (versions_->NeedsCompaction()) {
+      std::unique_ptr<Compaction> c = versions_->PickCompaction();
+      if (c != nullptr) {
+        CompactionState compact(c.get(), snapshots_.empty()
+                                             ? versions_->LastSequence()
+                                             : snapshots_.oldest()->sequence_number());
+        Status s = DoCompactionWork(&compact, &lock);
+        (void)s;
+      }
+      background_work_cv_.notify_all();
+      continue;
+    }
   }
 }
 
@@ -458,6 +603,7 @@ void DBImpl::CompactMemTable() {
   if (s.ok()) {
     imm_->Unref();
     imm_ = nullptr;
+    has_imm_.store(false, std::memory_order_release);
     RemoveObsoleteFiles();
   } else {
     bg_error_ = s;  // sticky
@@ -640,8 +786,332 @@ Status DBImpl::Flush() {
   return Status::OK();
 }
 
-Status DBImpl::CompactRange(std::string_view /*begin*/, std::string_view /*end*/) {
-  return Status::NotSupported("CompactRange is not supported in Week 1");
+void DBImpl::TEST_CompactRange(int level, const std::string* begin, const std::string* end) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  while (true) {
+    while (manual_compaction_ != nullptr && bg_error_.ok() && !shutting_down_) {
+      background_work_cv_.wait(lock);
+    }
+    if (!bg_error_.ok() || shutting_down_) {
+      break;
+    }
+    std::vector<FileMetaData*> overlapping;
+    versions_->GetOverlappingInputs(level, begin, end, &overlapping);
+    if (overlapping.empty()) {
+      break;
+    }
+    ManualCompaction manual;
+    manual.level = level;
+    manual.done = false;
+    manual.begin = begin;
+    manual.end = end;
+    manual_compaction_ = &manual;
+    background_work_cv_.notify_all();
+    while (!manual.done && bg_error_.ok() && !shutting_down_) {
+      background_work_cv_.wait(lock);
+    }
+    manual_compaction_ = nullptr;
+  }
+}
+
+int DBImpl::TEST_NumLevelFiles(int level) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return versions_->NumLevelFiles(level);
+}
+
+Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
+  Status s = Flush();
+  if (!s.ok()) {
+    return s;
+  }
+
+  std::string begin_str(begin);
+  std::string end_str(end);
+  const std::string* begin_ptr = begin.empty() ? nullptr : &begin_str;
+  const std::string* end_ptr = end.empty() ? nullptr : &end_str;
+
+  for (int level = 0; level < kNumLevels - 1; ++level) {
+    TEST_CompactRange(level, begin_ptr, end_ptr);
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  return bg_error_;
+}
+
+std::unique_ptr<Iterator> DBImpl::MakeInputIterator(Compaction* c) {
+  std::vector<std::unique_ptr<Iterator>> children;
+
+  if (c->level() == 0) {
+    for (size_t i = 0; i < c->num_input_files(0); ++i) {
+      children.push_back(
+          table_cache_->NewIterator(c->input(0, i)->number, c->input(0, i)->file_size));
+    }
+  } else {
+    if (c->num_input_files(0) > 0) {
+      auto index_iter = std::make_unique<LevelFileIndexIterator>(&icmp_, c->inputs(0));
+      auto block_fn = [this](std::string_view handle) -> std::unique_ptr<Iterator> {
+        uint64_t number = 0;
+        uint64_t file_size = 0;
+        std::string_view in = handle;
+        if (!GetVarint64(&in, &number) || !GetVarint64(&in, &file_size)) {
+          return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
+        }
+        return table_cache_->NewIterator(number, file_size);
+      };
+      children.push_back(NewTwoLevelIterator(std::move(index_iter), std::move(block_fn)));
+    }
+  }
+
+  if (c->num_input_files(1) > 0) {
+    auto index_iter = std::make_unique<LevelFileIndexIterator>(&icmp_, c->inputs(1));
+    auto block_fn = [this](std::string_view handle) -> std::unique_ptr<Iterator> {
+      uint64_t number = 0;
+      uint64_t file_size = 0;
+      std::string_view in = handle;
+      if (!GetVarint64(&in, &number) || !GetVarint64(&in, &file_size)) {
+        return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
+      }
+      return table_cache_->NewIterator(number, file_size);
+    };
+    children.push_back(NewTwoLevelIterator(std::move(index_iter), std::move(block_fn)));
+  }
+
+  return NewMergingIterator(&icmp_, std::move(children));
+}
+
+Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
+  STRATA_DCHECK(compact != nullptr);
+  STRATA_DCHECK(compact->builder == nullptr);
+
+  uint64_t file_number = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    file_number = versions_->NewFileNumber();
+    pending_outputs_.insert(file_number);
+  }
+
+  CompactionState::Output out;
+  out.number = file_number;
+  compact->outputs.push_back(out);
+
+  const std::string fname = TableFileName(dbname_, file_number);
+  std::unique_ptr<WritableFile> file;
+  Status s = env_->NewWritableFile(fname, &file);
+  if (!s.ok()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_outputs_.erase(file_number);
+    compact->outputs.pop_back();
+    return s;
+  }
+
+  compact->outfile = std::move(file);
+  compact->builder = std::make_unique<TableBuilder>(options_, &icmp_, compact->outfile.get());
+  compact->compaction->ResetOutputOverlap();
+  return Status::OK();
+}
+
+Status DBImpl::FinishCompactionOutputFile(CompactionState* compact) {
+  STRATA_DCHECK(compact != nullptr);
+  STRATA_DCHECK(compact->outfile != nullptr);
+  STRATA_DCHECK(compact->builder != nullptr);
+
+  const uint64_t output_number = compact->current_output()->number;
+  const std::string fname = TableFileName(dbname_, output_number);
+
+  Status s = compact->builder->Finish();
+  if (s.ok()) {
+    compact->current_output()->file_size = compact->builder->FileSize();
+    compact->total_bytes += compact->current_output()->file_size;
+    s = compact->outfile->Sync();
+  }
+  Status close_s = compact->outfile->Close();
+  if (s.ok() && !close_s.ok()) {
+    s = close_s;
+  }
+  compact->builder.reset();
+  compact->outfile.reset();
+
+  if (s.ok() && compact->current_output()->file_size > 0) {
+    s = env_->SyncDir(dbname_);
+  }
+
+  if (s.ok() && compact->current_output()->file_size > 0) {
+    std::unique_ptr<RandomAccessFile> rfile;
+    s = env_->NewRandomAccessFile(fname, &rfile);
+    if (s.ok()) {
+      std::unique_ptr<Table> table;
+      s = Table::Open(options_, &icmp_, std::move(rfile), compact->current_output()->file_size,
+                      &table);
+    }
+  }
+
+  if (!s.ok()) {
+    (void)env_->RemoveFile(fname);
+  }
+  return s;
+}
+
+Status DBImpl::InstallCompactionResults(CompactionState* compact) {
+  VersionEdit edit;
+  compact->compaction->AddInputDeletions(&edit);
+  const int level = compact->compaction->level();
+  for (const auto& out : compact->outputs) {
+    if (out.file_size > 0) {
+      edit.AddFile(level + 1, out.number, out.file_size, out.smallest, out.largest);
+    }
+  }
+
+  std::string largest_key;
+  for (size_t i = 0; i < compact->compaction->num_input_files(0); ++i) {
+    const std::string& key = compact->compaction->input(0, i)->largest;
+    if (largest_key.empty() || icmp_.Compare(key, largest_key) > 0) {
+      largest_key = key;
+    }
+  }
+  if (!largest_key.empty()) {
+    edit.SetCompactPointer(level, largest_key);
+  }
+
+  return versions_->LogAndApply(&edit);
+}
+
+Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::mutex>* lock) {
+  if (compact->compaction->IsTrivialMove()) {
+    STRATA_DCHECK(compact->compaction->num_input_files(0) == 1);
+    FileMetaData* f = compact->compaction->input(0, 0);
+    VersionEdit edit;
+    edit.RemoveFile(compact->compaction->level(), f->number);
+    edit.AddFile(compact->compaction->level() + 1, f->number, f->file_size, f->smallest,
+                 f->largest);
+    edit.SetCompactPointer(compact->compaction->level(), f->largest);
+
+    Status s = versions_->LogAndApply(&edit);
+    if (!s.ok()) {
+      bg_error_ = s;
+    }
+    compact->compaction->ReleaseInputVersion();
+    RemoveObsoleteFiles();
+    return s;
+  }
+
+  std::unique_ptr<Iterator> input = MakeInputIterator(compact->compaction);
+
+  lock->unlock();
+
+  input->SeekToFirst();
+  Status status = input->status();
+
+  std::string current_user_key;
+  bool has_current_user_key = false;
+  SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
+
+  while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
+    if (has_imm_.load(std::memory_order_relaxed)) {
+      lock->lock();
+      if (imm_ != nullptr) {
+        CompactMemTable();
+        background_work_cv_.notify_all();
+      }
+      lock->unlock();
+    }
+
+    std::string_view key = input->key();
+    ParsedInternalKey ikey;
+    if (!ParseInternalKey(key, &ikey)) {
+      current_user_key.clear();
+      has_current_user_key = false;
+      last_sequence_for_key = kMaxSequenceNumber;
+    } else {
+      if (!has_current_user_key || ikey.user_key != current_user_key) {
+        current_user_key = std::string(ikey.user_key);
+        has_current_user_key = true;
+        last_sequence_for_key = kMaxSequenceNumber;
+      }
+
+      bool drop = false;
+      if (last_sequence_for_key <= compact->smallest_snapshot) {
+        drop = true;
+      } else if (ikey.type == kTypeDeletion && ikey.sequence <= compact->smallest_snapshot &&
+                 compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
+        drop = true;
+      }
+
+      last_sequence_for_key = ikey.sequence;
+
+      if (!drop) {
+        if (compact->builder == nullptr) {
+          status = OpenCompactionOutputFile(compact);
+          if (!status.ok()) {
+            break;
+          }
+        }
+        if (compact->builder->NumEntries() == 0) {
+          compact->current_output()->smallest = std::string(key);
+        }
+        compact->current_output()->largest = std::string(key);
+        compact->builder->Add(key, input->value());
+      }
+    }
+
+    input->Next();
+
+    if (compact->builder != nullptr && input->Valid()) {
+      ParsedInternalKey next_ikey;
+      if (ParseInternalKey(input->key(), &next_ikey)) {
+        if (next_ikey.user_key != current_user_key) {
+          if (compact->builder->FileSize() >= compact->compaction->max_output_file_size() ||
+              compact->compaction->ShouldStopBefore(input->key())) {
+            status = FinishCompactionOutputFile(compact);
+            if (!status.ok()) {
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (status.ok()) {
+    status = input->status();
+  }
+
+  if (status.ok() && compact->builder != nullptr) {
+    status = FinishCompactionOutputFile(compact);
+  }
+
+  if (!status.ok() && compact->builder != nullptr) {
+    compact->builder->Abandon();
+    (void)compact->outfile->Close();
+    compact->builder.reset();
+    compact->outfile.reset();
+  }
+
+  lock->lock();
+
+  for (const auto& out : compact->outputs) {
+    pending_outputs_.erase(out.number);
+  }
+
+  if (status.ok() && shutting_down_.load(std::memory_order_acquire)) {
+    status = Status::IOError("compaction aborted by shutdown");
+  }
+
+  if (status.ok()) {
+    status = InstallCompactionResults(compact);
+  }
+
+  compact->compaction->ReleaseInputVersion();
+
+  if (!status.ok()) {
+    if (!shutting_down_.load(std::memory_order_acquire)) {
+      bg_error_ = status;
+    }
+    for (const auto& out : compact->outputs) {
+      (void)env_->RemoveFile(TableFileName(dbname_, out.number));
+    }
+  }
+
+  RemoveObsoleteFiles();
+  return status;
 }
 
 bool DBImpl::GetProperty(std::string_view name, std::string* value) {

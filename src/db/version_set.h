@@ -175,6 +175,7 @@ class Compaction {
 
   Version* input_version() const { return input_version_; }
   void SetInputVersion(Version* v);
+  void ReleaseInputVersion();
 
   size_t num_input_files(int which) const {
     STRATA_DCHECK(which == 0 || which == 1);

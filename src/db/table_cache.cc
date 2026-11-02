@@ -61,4 +61,42 @@ void TableCache::Evict(uint64_t number) {
   cache_.erase(number);
 }
 
+namespace {
+
+class TableIteratorWrapper : public Iterator {
+ public:
+  TableIteratorWrapper(std::shared_ptr<Table> table, std::unique_ptr<Iterator> iter)
+      : table_(std::move(table)), iter_(std::move(iter)) {}
+  ~TableIteratorWrapper() override = default;
+
+  bool Valid() const override { return iter_->Valid(); }
+  void SeekToFirst() override { iter_->SeekToFirst(); }
+  void SeekToLast() override { iter_->SeekToLast(); }
+  void Seek(std::string_view target) override { iter_->Seek(target); }
+  void Next() override { iter_->Next(); }
+  void Prev() override { iter_->Prev(); }
+  std::string_view key() const override { return iter_->key(); }
+  std::string_view value() const override { return iter_->value(); }
+  Status status() const override { return iter_->status(); }
+
+ private:
+  std::shared_ptr<Table> table_;
+  std::unique_ptr<Iterator> iter_;
+};
+
+}  // namespace
+
+std::unique_ptr<Iterator> TableCache::NewIterator(uint64_t number, uint64_t file_size,
+                                                  Table** tableptr) {
+  std::shared_ptr<Table> table;
+  Status s = FindTable(number, file_size, &table);
+  if (!s.ok()) {
+    return NewErrorIterator(s);
+  }
+  if (tableptr != nullptr) {
+    *tableptr = table.get();
+  }
+  return std::make_unique<TableIteratorWrapper>(table, table->NewIterator());
+}
+
 }  // namespace strata

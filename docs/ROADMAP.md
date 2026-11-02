@@ -40,10 +40,10 @@ Tick items off as they land; each one should arrive with its tests.
 **Milestone:** a 10M-key `fillrandom` finishes with L0 under the stop trigger, and the model test passes.
 
 - [x] Level scores, compact pointers, input selection and expansion, trivial move
-- [ ] Compaction merge loop with drop rules for old versions and tombstones
-- [ ] Output splitting by size and by grandparent overlap
-- [ ] Version refcounting and obsolete file deletion
-- [ ] Write backpressure: slowdown at 8 L0 files, stop at 12
+- [x] Compaction merge loop with drop rules for old versions and tombstones
+- [x] Output splitting by size and by grandparent overlap
+- [x] Version refcounting and obsolete file deletion
+- [x] Write backpressure: slowdown at 8 L0 files, stop at 12
 - [ ] Merging iterator (forward and reverse) and `DBIter`
 - [ ] Snapshots: list of live snapshots, oldest-snapshot rule in compaction
 - [ ] Model-based randomized test with reopen, snapshots and `CompactRange`

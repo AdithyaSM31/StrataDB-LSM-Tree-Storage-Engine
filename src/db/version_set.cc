@@ -778,6 +778,13 @@ void Compaction::SetInputVersion(Version* v) {
   }
 }
 
+void Compaction::ReleaseInputVersion() {
+  if (input_version_ != nullptr) {
+    input_version_->Unref();
+    input_version_ = nullptr;
+  }
+}
+
 bool Compaction::IsTrivialMove() const {
   if (inputs_[0].size() != 1 || !inputs_[1].empty()) {
     return false;

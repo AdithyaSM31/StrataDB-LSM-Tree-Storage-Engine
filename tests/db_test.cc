@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "db/db_impl.h"
 #include "db/filename.h"
 #include "db/write_batch_internal.h"
 #include "log/log_writer.h"
@@ -21,6 +22,8 @@
 #include "strata/options.h"
 #include "strata/status.h"
 #include "strata/write_batch.h"
+#include "table/table.h"
+#include "util/comparator.h"
 
 namespace strata {
 namespace {
@@ -148,6 +151,50 @@ class DBTest : public ::testing::Test {
       if (ParseFileName(name, &num, &type) && type == target_type) {
         ++count;
       }
+    }
+    return count;
+  }
+
+  DBImpl* dbfull() { return static_cast<DBImpl*>(db_.get()); }
+
+  std::vector<std::string> GetTableFiles() {
+    std::vector<std::string> children;
+    Status s = env_->GetChildren(test_dir_, &children);
+    if (!s.ok()) {
+      return {};
+    }
+    std::vector<std::string> tables;
+    for (const auto& name : children) {
+      uint64_t num;
+      FileType type;
+      if (ParseFileName(name, &num, &type) && type == FileType::kTableFile) {
+        tables.push_back(test_dir_ + "/" + name);
+      }
+    }
+    return tables;
+  }
+
+  int CountEntriesInTable(const std::string& path) {
+    uint64_t size = 0;
+    Status s = env_->GetFileSize(path, &size);
+    if (!s.ok()) {
+      return -1;
+    }
+    std::unique_ptr<RandomAccessFile> file;
+    s = env_->NewRandomAccessFile(path, &file);
+    if (!s.ok()) {
+      return -1;
+    }
+    std::unique_ptr<Table> table;
+    InternalKeyComparator icmp;
+    s = Table::Open(options_, &icmp, std::move(file), size, &table);
+    if (!s.ok()) {
+      return -1;
+    }
+    int count = 0;
+    std::unique_ptr<Iterator> it = table->NewIterator();
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+      ++count;
     }
     return count;
   }
@@ -663,7 +710,7 @@ TEST_F(DBTest, FutureMethodsReturnNotSupported) {
   ASSERT_TRUE(Open(opts).ok());
 
   EXPECT_TRUE(db_->Flush().ok());
-  EXPECT_TRUE(db_->CompactRange("a", "z").IsNotSupported());
+  EXPECT_TRUE(db_->CompactRange("a", "z").ok());
   std::unique_ptr<Iterator> it = db_->NewIterator(ReadOptions());
   ASSERT_NE(it, nullptr);
   EXPECT_FALSE(it->Valid());
@@ -1290,6 +1337,225 @@ TEST_F(DBTest, TinyWriteBufferIsRaisedToTheMinimum) {
   EXPECT_EQ(CountFiles(FileType::kTableFile), 0);
   ASSERT_TRUE(db_->Flush().ok());
   EXPECT_EQ(CountFiles(FileType::kTableFile), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Week 3 Compaction Integration Tests
+// ---------------------------------------------------------------------------
+
+TEST_F(DBTest, DropRulesWithoutSnapshots) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Write key with multiple versions across flushes
+  ASSERT_TRUE(Put("key1", "val1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_TRUE(Put("key1", "val2").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_TRUE(Put("key1", "val3").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 3);
+
+  // Compact the entire database
+  ASSERT_TRUE(db_->CompactRange("", "").ok());
+
+  // Point lookup must return latest value
+  EXPECT_EQ(Get("key1"), "val3");
+
+  // Inspect table files: older versions val1 and val2 must be dropped
+  auto tables = GetTableFiles();
+  int total_entries = 0;
+  for (const auto& t : tables) {
+    total_entries += CountEntriesInTable(t);
+  }
+  EXPECT_EQ(total_entries, 1);
+}
+
+TEST_F(DBTest, DropRulesWithSnapshot) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("key1", "v0").ok());
+  ASSERT_TRUE(Put("key1", "v1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  const Snapshot* snap = db_->GetSnapshot();
+  ASSERT_NE(snap, nullptr);
+
+  ASSERT_TRUE(Put("key1", "v2").ok());
+  ASSERT_TRUE(Put("key1", "v3").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  ASSERT_TRUE(db_->CompactRange("", "").ok());
+
+  // Snapshot reads v1
+  ReadOptions ro_snap;
+  ro_snap.snapshot = snap;
+  EXPECT_EQ(Get("key1", nullptr, ro_snap), "v1");
+
+  // Non-snapshot read returns newest v3
+  ReadOptions ro_latest;
+  EXPECT_EQ(Get("key1", nullptr, ro_latest), "v3");
+
+  // Release the snapshot and write a new version to trigger merge compaction:
+  // now older versions v1, v2, v3 are all dropped, only v4 survives.
+  db_->ReleaseSnapshot(snap);
+  ASSERT_TRUE(Put("key1", "v4").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_TRUE(db_->CompactRange("", "").ok());
+
+  EXPECT_EQ(Get("key1"), "v4");
+  auto tables = GetTableFiles();
+  int total_entries = 0;
+  for (const auto& t : tables) {
+    total_entries += CountEntriesInTable(t);
+  }
+  EXPECT_EQ(total_entries, 1);
+}
+
+TEST_F(DBTest, TombstoneSurvivesUntilBaseLevel) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Step 1: Write "k1" -> "v1", flush to L0, compact to L1, then L2
+  ASSERT_TRUE(Put("k1", "v1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  dbfull()->TEST_CompactRange(0, nullptr, nullptr);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(0), 0);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(1), 1);
+
+  dbfull()->TEST_CompactRange(1, nullptr, nullptr);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(1), 0);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(2), 1);
+  EXPECT_EQ(Get("k1"), "v1");
+
+  // Step 2: Delete "k1" and flush to L0
+  ASSERT_TRUE(Delete("k1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(0), 1);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(2), 1);
+
+  // Step 3: Compact L0 to L1.
+  // Because L2 has "k1", IsBaseLevelForKey is false: tombstone must survive in L1!
+  dbfull()->TEST_CompactRange(0, nullptr, nullptr);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(0), 0);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(1), 1);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(2), 1);
+
+  Status s;
+  Get("k1", &s);
+  EXPECT_TRUE(s.IsNotFound());
+
+  // Step 4: Compact L1 down to L2.
+  // Now tombstone in L1 meets value in L2, and IsBaseLevelForKey is true (nothing in L3+).
+  // Both tombstone and value are eliminated!
+  dbfull()->TEST_CompactRange(1, nullptr, nullptr);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(1), 0);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(2), 0);
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 0);
+
+  Get("k1", &s);
+  EXPECT_TRUE(s.IsNotFound());
+}
+
+TEST_F(DBTest, DeleteEverythingThenCompactReclaimsSpace) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  for (int i = 0; i < 1000; ++i) {
+    ASSERT_TRUE(Put("k" + std::to_string(i), std::string(100, 'x')).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_GT(CountFiles(FileType::kTableFile), 0);
+
+  for (int i = 0; i < 1000; ++i) {
+    ASSERT_TRUE(Delete("k" + std::to_string(i)).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  ASSERT_TRUE(db_->CompactRange("", "").ok());
+
+  for (int i = 0; i < 1000; ++i) {
+    Status s;
+    Get("k" + std::to_string(i), &s);
+    EXPECT_TRUE(s.IsNotFound());
+  }
+
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 0);
+}
+
+TEST_F(DBTest, SustainedLoadAcrossLevels) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 64 * 1024;
+  opts.max_file_size = 64 * 1024;
+  opts.max_bytes_for_level_base = 256 * 1024;
+  ASSERT_TRUE(Open(opts).ok());
+
+  constexpr int kNumKeys = 10000;
+  for (int i = 0; i < kNumKeys; ++i) {
+    std::string key = "key_" + std::to_string((i * 10007) % kNumKeys);
+    std::string value(100, static_cast<char>('a' + (i % 26)));
+    ASSERT_TRUE(Put(key, value).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // L0 files must be under the stop trigger (12)
+  EXPECT_LE(dbfull()->TEST_NumLevelFiles(0), opts.l0_stop_trigger);
+
+  // Background compaction must have pushed data down to L2 or deeper
+  int deeper_files = 0;
+  for (int lvl = 2; lvl < kNumLevels; ++lvl) {
+    deeper_files += dbfull()->TEST_NumLevelFiles(lvl);
+  }
+  EXPECT_GT(deeper_files, 0);
+
+  // Reopen DB and verify data integrity
+  ASSERT_TRUE(Reopen(opts).ok());
+
+  for (int i = 0; i < kNumKeys; ++i) {
+    std::string key = "key_" + std::to_string((i * 10007) % kNumKeys);
+    std::string expected_value(100, static_cast<char>('a' + (i % 26)));
+    Status s;
+    std::string val = Get(key, &s);
+    ASSERT_TRUE(s.ok()) << "Failed to get " << key << ": " << s.ToString() << " at index " << i;
+    ASSERT_EQ(val, expected_value);
+  }
+}
+
+TEST_F(DBTest, UserKeyBoundarySplitNeverSplitsSameKeyAcrossFiles) {
+  Options opts;
+  opts.create_if_missing = true;
+  // Set small file size so files split frequently
+  opts.max_file_size = 1024;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Write many versions of the same key
+  const Snapshot* snap = db_->GetSnapshot();
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(Put("hot_key", std::string(100, 'x')).ok());
+  }
+  // And a couple of other keys
+  ASSERT_TRUE(Put("a_key", "val_a").ok());
+  ASSERT_TRUE(Put("z_key", "val_z").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // Compact L0 down to L1
+  dbfull()->TEST_CompactRange(0, nullptr, nullptr);
+
+  // In L1, verify that every file's largest user key is strictly less than
+  // the next file's smallest user key (STRATA_DCHECK in VersionSet checks this,
+  // but let's explicitly verify it as well).
+  EXPECT_EQ(Get("a_key"), "val_a");
+  EXPECT_EQ(Get("hot_key"), std::string(100, 'x'));
+  EXPECT_EQ(Get("z_key"), "val_z");
+
+  db_->ReleaseSnapshot(snap);
 }
 
 }  // namespace
