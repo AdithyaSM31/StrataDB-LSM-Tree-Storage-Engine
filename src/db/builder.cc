@@ -17,12 +17,16 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
   iter->SeekToFirst();
 
   const std::string fname = TableFileName(dbname, meta->number);
+  Status s = iter->status();
+  if (!s.ok()) {
+    return s;
+  }
   if (!iter->Valid()) {
     return Status::OK();
   }
 
   std::unique_ptr<WritableFile> file;
-  Status s = env->NewWritableFile(fname, &file);
+  s = env->NewWritableFile(fname, &file);
   if (!s.ok()) {
     return s;
   }

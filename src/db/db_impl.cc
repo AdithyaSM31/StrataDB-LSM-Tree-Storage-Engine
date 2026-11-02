@@ -255,7 +255,9 @@ Status DBImpl::Recover() {
       return s;
     }
     VersionEdit edit;
-    edit.AddFile(0, meta.number, meta.file_size, meta.smallest, meta.largest);
+    if (meta.file_size > 0) {
+      edit.AddFile(0, meta.number, meta.file_size, meta.smallest, meta.largest);
+    }
     edit.SetLogNumber(logfile_number_);
     s = versions_->LogAndApply(&edit);
     if (!s.ok()) {
@@ -423,9 +425,11 @@ void DBImpl::CompactMemTable() {
   base->Unref();
   pending_outputs_.erase(meta.number);
 
-  if (s.ok() && meta.file_size > 0) {
+  if (s.ok()) {
     VersionEdit edit;
-    edit.AddFile(0, meta.number, meta.file_size, meta.smallest, meta.largest);
+    if (meta.file_size > 0) {
+      edit.AddFile(0, meta.number, meta.file_size, meta.smallest, meta.largest);
+    }
     edit.SetLogNumber(logfile_number_);  // the log that belongs to mem_, NOT to imm_
     s = versions_->LogAndApply(&edit);
   }
@@ -517,6 +521,7 @@ Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
   }
   if (!s.ok()) {
     bg_error_ = s;  // sticky: after one failed log write, every later write returns the same error
+    background_work_cv_.notify_all();
     return s;
   }
 

@@ -15,6 +15,9 @@ TableCache::TableCache(std::string dbname, const Options& options,
       icmp_(icmp) {}
 
 Status TableCache::FindTable(uint64_t number, uint64_t file_size, std::shared_ptr<Table>* table) {
+  if (table == nullptr) {
+    return Status::InvalidArgument("table is null");
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = cache_.find(number);
   if (it != cache_.end()) {

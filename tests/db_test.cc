@@ -1192,5 +1192,70 @@ TEST_F(DBTest, ProcessCrashDuringFlushes) {
   }
 }
 
+TEST_F(DBTest, FlushOnEmptyDB) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Flush without any writes
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 0);
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1);
+}
+
+TEST_F(DBTest, MultipleConsecutiveFlushes) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("k1", "v1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 1);
+
+  // Subsequent flushes on empty memtable must succeed and not create spurious .sst files
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 1);
+
+  EXPECT_EQ(Get("k1"), "v1");
+}
+
+TEST_F(DBTest, DeleteNonExistentKeyThenFlush) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Delete("absent_key").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  Status s;
+  Get("absent_key", &s);
+  EXPECT_TRUE(s.IsNotFound());
+}
+
+TEST_F(DBTest, ConcurrentFlushes) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 4096;
+  ASSERT_TRUE(Open(opts).ok());
+
+  for (int i = 0; i < 100; ++i) {
+    ASSERT_TRUE(Put("k" + std::to_string(i), "v" + std::to_string(i)).ok());
+  }
+
+  std::vector<std::thread> flush_threads;
+  flush_threads.reserve(4);
+  for (int i = 0; i < 4; ++i) {
+    flush_threads.emplace_back([this]() { EXPECT_TRUE(db_->Flush().ok()); });
+  }
+  for (auto& t : flush_threads) {
+    t.join();
+  }
+
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_EQ(Get("k" + std::to_string(i)), "v" + std::to_string(i));
+  }
+}
+
 }  // namespace
 }  // namespace strata

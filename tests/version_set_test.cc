@@ -8,13 +8,17 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "db/builder.h"
 #include "db/dbformat.h"
 #include "db/filename.h"
+#include "db/table_cache.h"
 #include "db/version_edit.h"
 #include "log/log_writer.h"
+#include "memtable/memtable.h"
 #include "strata/env.h"
 #include "strata/options.h"
 #include "strata/status.h"
@@ -110,6 +114,23 @@ class VersionSetTest : public ::testing::Test {
       s = SetCurrentFile(env_, test_dir_, 1);
     }
     return s;
+  }
+
+  FileMetaData BuildTableWithEntries(
+      uint64_t file_num,
+      const std::vector<std::tuple<std::string, SequenceNumber, ValueType, std::string>>& entries) {
+    auto* mem = new MemTable(icmp_);
+    mem->Ref();
+    for (const auto& [key, seq, type, val] : entries) {
+      mem->Add(seq, type, key, val);
+    }
+    FileMetaData meta;
+    meta.number = file_num;
+    std::unique_ptr<Iterator> iter = mem->NewIterator();
+    Status s = BuildTable(test_dir_, env_, options_, icmp_, iter.get(), &meta);
+    EXPECT_TRUE(s.ok()) << s.ToString();
+    mem->Unref();
+    return meta;
   }
 
   Env* env_ = nullptr;
@@ -625,6 +646,163 @@ TEST_F(VersionSetTest, FailedEditAppendOnAnOpenManifest) {
   // L0 is newest first.
   EXPECT_EQ(reopened.current()->files(0)[0]->number, 12U);
   EXPECT_EQ(reopened.current()->files(0)[1]->number, 10U);
+}
+
+TEST_F(VersionSetTest, VersionGetL1BinarySearch) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  FileMetaData meta1 = BuildTableWithEntries(100, {{"a", 10, kTypeValue, "val_a"},
+                                                   {"b", 10, kTypeValue, "val_b"},
+                                                   {"c", 10, kTypeValue, "val_c"}});
+  FileMetaData meta2 = BuildTableWithEntries(101, {{"e", 10, kTypeValue, "val_e"},
+                                                   {"f", 10, kTypeValue, "val_f"},
+                                                   {"g", 10, kTypeValue, "val_g"}});
+  FileMetaData meta3 = BuildTableWithEntries(102, {{"p", 10, kTypeValue, "val_p"},
+                                                   {"q", 10, kTypeDeletion, ""},
+                                                   {"z", 10, kTypeValue, "val_z"}});
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  VersionEdit edit;
+  edit.AddFile(1, meta1.number, meta1.file_size, meta1.smallest, meta1.largest);
+  edit.AddFile(1, meta2.number, meta2.file_size, meta2.smallest, meta2.largest);
+  edit.AddFile(1, meta3.number, meta3.file_size, meta3.smallest, meta3.largest);
+  ASSERT_TRUE(vset.LogAndApply(&edit).ok());
+
+  TableCache cache(test_dir_, options_, &icmp_);
+  std::string val;
+
+  // Key in first table
+  Status s = vset.current()->Get(LookupKey("b", 10), &val, &cache);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(val, "val_b");
+
+  // Key before first table
+  s = vset.current()->Get(LookupKey("0", 10), &val, &cache);
+  EXPECT_TRUE(s.IsNotFound());
+
+  // Key in gap between table 1 and table 2
+  s = vset.current()->Get(LookupKey("d", 10), &val, &cache);
+  EXPECT_TRUE(s.IsNotFound());
+
+  // Key in middle table
+  s = vset.current()->Get(LookupKey("f", 10), &val, &cache);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(val, "val_f");
+
+  // Deleted key (tombstone) in third table
+  s = vset.current()->Get(LookupKey("q", 10), &val, &cache);
+  EXPECT_TRUE(s.IsNotFound());
+
+  // Key in third table
+  s = vset.current()->Get(LookupKey("z", 10), &val, &cache);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(val, "val_z");
+
+  // Key after third table
+  s = vset.current()->Get(LookupKey("zzz", 10), &val, &cache);
+  EXPECT_TRUE(s.IsNotFound());
+}
+
+TEST_F(VersionSetTest, VersionGetMultiLevelHiding) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  // Level 2 table
+  FileMetaData meta_l2 = BuildTableWithEntries(200, {{"k1", 5, kTypeValue, "v1_l2"},
+                                                     {"k2", 5, kTypeValue, "v2_l2"},
+                                                     {"k3", 5, kTypeValue, "v3_l2"}});
+
+  // Level 1 table
+  FileMetaData meta_l1 =
+      BuildTableWithEntries(201, {{"k1", 10, kTypeValue, "v1_l1"}, {"k2", 10, kTypeDeletion, ""}});
+
+  // Level 0 table
+  FileMetaData meta_l0 = BuildTableWithEntries(202, {{"k3", 15, kTypeValue, "v3_l0"}});
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  VersionEdit edit;
+  edit.AddFile(2, meta_l2.number, meta_l2.file_size, meta_l2.smallest, meta_l2.largest);
+  edit.AddFile(1, meta_l1.number, meta_l1.file_size, meta_l1.smallest, meta_l1.largest);
+  edit.AddFile(0, meta_l0.number, meta_l0.file_size, meta_l0.smallest, meta_l0.largest);
+  ASSERT_TRUE(vset.LogAndApply(&edit).ok());
+
+  TableCache cache(test_dir_, options_, &icmp_);
+  std::string val;
+
+  // k1: L1 value hides L2 value
+  Status s = vset.current()->Get(LookupKey("k1", 20), &val, &cache);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(val, "v1_l1");
+
+  // k2: L1 tombstone hides L2 value
+  s = vset.current()->Get(LookupKey("k2", 20), &val, &cache);
+  EXPECT_TRUE(s.IsNotFound());
+
+  // k3: L0 value hides L2 value
+  s = vset.current()->Get(LookupKey("k3", 20), &val, &cache);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(val, "v3_l0");
+}
+
+TEST_F(VersionSetTest, AddLiveFilesAndNumLevelFiles) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  VersionEdit edit1;
+  std::string s_a = MakeInternalKey("a", 1, kTypeValue);
+  std::string l_b = MakeInternalKey("b", 1, kTypeValue);
+  edit1.AddFile(0, 10, 100, s_a, l_b);
+  edit1.AddFile(1, 20, 200, s_a, l_b);
+  edit1.AddFile(2, 30, 300, s_a, l_b);
+  ASSERT_TRUE(vset.LogAndApply(&edit1).ok());
+
+  EXPECT_EQ(vset.NumLevelFiles(0), 1);
+  EXPECT_EQ(vset.NumLevelFiles(1), 1);
+  EXPECT_EQ(vset.NumLevelFiles(2), 1);
+  EXPECT_EQ(vset.NumLevelFiles(3), 0);
+
+  EXPECT_EQ(vset.current()->NumLevelFiles(0), 1);
+  EXPECT_EQ(vset.current()->NumLevelFiles(1), 1);
+  EXPECT_EQ(vset.current()->NumLevelFiles(2), 1);
+
+  std::set<uint64_t> live;
+  vset.AddLiveFiles(&live);
+  EXPECT_EQ(live.size(), 3u);
+  EXPECT_TRUE(live.count(10));
+  EXPECT_TRUE(live.count(20));
+  EXPECT_TRUE(live.count(30));
+
+  // Pin current version
+  Version* v1 = vset.current();
+  v1->Ref();
+
+  // Apply a new edit deleting file 10 and adding file 11
+  VersionEdit edit2;
+  edit2.RemoveFile(0, 10);
+  edit2.AddFile(0, 11, 100, s_a, l_b);
+  ASSERT_TRUE(vset.LogAndApply(&edit2).ok());
+
+  // v1 is still pinned, so AddLiveFiles includes files from both versions: 10, 11, 20, 30
+  live.clear();
+  vset.AddLiveFiles(&live);
+  EXPECT_EQ(live.size(), 4u);
+  EXPECT_TRUE(live.count(10));
+  EXPECT_TRUE(live.count(11));
+  EXPECT_TRUE(live.count(20));
+  EXPECT_TRUE(live.count(30));
+
+  v1->Unref();
+  // Now v1 is destroyed, so 10 is no longer live
+  live.clear();
+  vset.AddLiveFiles(&live);
+  EXPECT_EQ(live.size(), 3u);
+  EXPECT_FALSE(live.count(10));
+  EXPECT_TRUE(live.count(11));
 }
 
 }  // namespace

@@ -116,8 +116,9 @@ Status Version::Get(const LookupKey& key, std::string* value, TableCache* cache)
       continue;
     }
     auto it = std::lower_bound(files_[level].begin(), files_[level].end(), key.internal_key(),
-                               [this](const FileMetaData* f, std::string_view ikey) {
-                                 return vset_->icmp().Compare(f->largest, ikey) < 0;
+                               [](const FileMetaData* f, std::string_view ikey) {
+                                 InternalKeyComparator icmp;
+                                 return icmp.Compare(f->largest, ikey) < 0;
                                });
     if (it != files_[level].end()) {
       const FileMetaData* f = *it;

@@ -130,5 +130,11 @@ TEST_F(TableCacheTest, MissingFileReturnsError) {
   EXPECT_EQ(t, nullptr);
 }
 
+TEST_F(TableCacheTest, NullTablePointerReturnsInvalidArgument) {
+  TableCache cache(test_dir_, options_, &icmp_);
+  Status s = cache.FindTable(10, 100, nullptr);
+  EXPECT_TRUE(s.IsInvalidArgument());
+}
+
 }  // namespace
 }  // namespace strata
