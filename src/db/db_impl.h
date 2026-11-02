@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "db/dbformat.h"
+#include "db/version_set.h"
 #include "log/log_writer.h"
 #include "memtable/memtable.h"
 #include "strata/db.h"
@@ -91,6 +92,7 @@ class DBImpl : public DB {
   Status Recover();  // called by DB::Open
 
  private:
+  Status NewDB();
   Status RecoverLogFile(uint64_t number, SequenceNumber* max_sequence);
 
   Env* const env_;
@@ -100,7 +102,8 @@ class DBImpl : public DB {
 
   std::mutex mutex_;
   std::unique_ptr<FileLock> db_lock_;
-  MemTable* mem_ = nullptr;  // Ref'd; guarded by mutex_
+  std::unique_ptr<VersionSet> versions_;  // guarded by mutex_
+  MemTable* mem_ = nullptr;               // Ref'd; guarded by mutex_
   std::unique_ptr<WritableFile> logfile_;
   std::unique_ptr<log::Writer> log_;
   uint64_t logfile_number_ = 0;

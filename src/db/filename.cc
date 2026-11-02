@@ -3,8 +3,11 @@
 #include <charconv>
 #include <cinttypes>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <string_view>
+
+#include "strata/env.h"
 
 namespace strata {
 
@@ -34,6 +37,39 @@ std::string CurrentFileName(const std::string& dbname) { return dbname + "/CURRE
 
 std::string TempFileName(const std::string& dbname, uint64_t number) {
   return MakeFileName(dbname, number, "dbtmp");
+}
+
+Status SetCurrentFile(Env* env, const std::string& dbname, uint64_t descriptor_number) {
+  char manifest_buf[100];
+  std::snprintf(manifest_buf, sizeof(manifest_buf), "MANIFEST-%06" PRIu64 "\n", descriptor_number);
+  std::string_view contents(manifest_buf);
+
+  std::string tmp = TempFileName(dbname, descriptor_number);
+  std::unique_ptr<WritableFile> file;
+  Status s = env->NewWritableFile(tmp, &file);
+  if (!s.ok()) {
+    return s;
+  }
+
+  s = file->Append(contents);
+  if (s.ok()) {
+    s = file->Sync();
+  }
+  if (s.ok()) {
+    s = file->Close();
+  }
+  if (!s.ok()) {
+    (void)env->RemoveFile(tmp);
+    return s;
+  }
+
+  s = env->RenameFile(tmp, CurrentFileName(dbname));
+  if (!s.ok()) {
+    (void)env->RemoveFile(tmp);
+    return s;
+  }
+
+  return env->SyncDir(dbname);
 }
 
 bool ParseFileName(std::string_view name, uint64_t* number, FileType* type) {

@@ -11,6 +11,8 @@
 
 #include "db/dbformat.h"
 #include "db/filename.h"
+#include "db/version_edit.h"
+#include "db/version_set.h"
 #include "db/write_batch_internal.h"
 #include "log/log_reader.h"
 #include "log/log_writer.h"
@@ -57,9 +59,46 @@ DBImpl::~DBImpl() {
     mem_->Unref();
     mem_ = nullptr;
   }
+  if (versions_ != nullptr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    versions_.reset();
+  }
   if (db_lock_ != nullptr) {
     (void)env_->UnlockFile(std::move(db_lock_));
   }
+}
+
+Status DBImpl::NewDB() {
+  VersionEdit new_db;
+  new_db.SetComparatorName(icmp_.Name());
+  new_db.SetLogNumber(0);
+  new_db.SetNextFile(2);
+  new_db.SetLastSequence(0);
+
+  const std::string manifest = DescriptorFileName(dbname_, 1);
+  std::unique_ptr<WritableFile> file;
+  Status s = env_->NewWritableFile(manifest, &file);
+  if (!s.ok()) {
+    return s;
+  }
+  {
+    log::Writer log(file.get());
+    std::string record;
+    new_db.EncodeTo(&record);
+    s = log.AddRecord(record);
+    if (s.ok()) {
+      s = file->Sync();
+    }
+  }
+  if (s.ok()) {
+    s = file->Close();
+  }
+  if (s.ok()) {
+    s = SetCurrentFile(env_, dbname_, 1);
+  } else {
+    (void)env_->RemoveFile(manifest);
+  }
+  return s;
 }
 
 Status DBImpl::Recover() {
@@ -72,9 +111,6 @@ Status DBImpl::Recover() {
     if (!s.ok()) {
       return s;
     }
-  } else {
-    // PosixEnv::CreateDir returns an error if the directory already exists.
-    // In Week 1, treat that as fine and proceed to evaluate DB existence.
   }
 
   // Acquire exclusive file lock on LockFileName(dbname_)
@@ -83,7 +119,9 @@ Status DBImpl::Recover() {
     return s;
   }
 
-  // Find all .log files
+  const bool current_exists = env_->FileExists(CurrentFileName(dbname_));
+
+  // Find all children for legacy logs scan / existence check
   std::vector<std::string> filenames;
   s = env_->GetChildren(dbname_, &filenames);
   if (!s.ok()) {
@@ -101,11 +139,16 @@ Status DBImpl::Recover() {
     }
   }
 
-  // Check create_if_missing and error_if_exists based on database existence.
-  // In Week 1 (before MANIFEST/CURRENT in Week 2), a database exists iff .log files exist.
-  if (logs.empty()) {
-    if (!options_.create_if_missing) {
+  if (!current_exists) {
+    if (!options_.create_if_missing && logs.empty()) {
       return Status::InvalidArgument(dbname_, "does not exist (create_if_missing is false)");
+    }
+    if (options_.error_if_exists && (current_exists || !logs.empty())) {
+      return Status::InvalidArgument(dbname_, "exists (error_if_exists is true)");
+    }
+    s = NewDB();
+    if (!s.ok()) {
+      return s;
     }
   } else {
     if (options_.error_if_exists) {
@@ -113,35 +156,60 @@ Status DBImpl::Recover() {
     }
   }
 
-  // Sort them numerically. GetChildren returns names in no particular order,
-  // and replaying out of order would apply old writes on top of new ones.
-  std::sort(logs.begin(), logs.end());
-
-  if (!logs.empty() && logs.back() == std::numeric_limits<uint64_t>::max()) {
-    return Status::InvalidArgument("logfile number overflow");
+  versions_ = std::make_unique<VersionSet>(dbname_, &options_, &icmp_);
+  s = versions_->Recover();
+  if (!s.ok()) {
+    return s;
   }
+
+  // Scan directory and mark all file numbers as used in VersionSet
+  filenames.clear();
+  s = env_->GetChildren(dbname_, &filenames);
+  if (!s.ok()) {
+    return s;
+  }
+  logs.clear();
+  for (const auto& filename : filenames) {
+    uint64_t number = 0;
+    FileType type;
+    if (ParseFileName(filename, &number, &type)) {
+      versions_->MarkFileNumberUsed(number);
+      if (type == FileType::kLogFile) {
+        logs.push_back(number);
+      }
+    }
+  }
+
+  // Replay only logs numbered at or above versions_->LogNumber()
+  std::vector<uint64_t> logs_to_replay;
+  for (uint64_t log_num : logs) {
+    if (log_num >= versions_->LogNumber()) {
+      logs_to_replay.push_back(log_num);
+    }
+  }
+  std::sort(logs_to_replay.begin(), logs_to_replay.end());
 
   // mem_ must be initialized before replay since replay fills it.
   mem_ = new MemTable(icmp_);
   mem_->Ref();
 
-  // Replay every log in ascending order, tracking the highest sequence number seen.
+  // Replay every log in ascending order, tracking highest sequence number seen.
   SequenceNumber max_sequence = 0;
-  for (uint64_t log_num : logs) {
+  for (uint64_t log_num : logs_to_replay) {
     s = RecoverLogFile(log_num, &max_sequence);
     if (!s.ok()) {
       return s;
     }
   }
 
-  if (last_sequence_ < max_sequence) {
-    last_sequence_ = max_sequence;
+  if (max_sequence > versions_->LastSequence()) {
+    versions_->SetLastSequence(max_sequence);
   }
+  last_sequence_ = versions_->LastSequence();
 
-  // Always start a new log on Open, numbered one higher than the largest existing one.
-  // Never append to the old one to avoid corruption when replaying past a torn tail.
-  const uint64_t new_log_number = logs.empty() ? 1 : (logs.back() + 1);
-  logfile_number_ = new_log_number;
+  // Create a new log file using VersionSet's file numbering.
+  // In Week 2 task, do not advance the log number in the MANIFEST until memtable is flushed to L0.
+  logfile_number_ = versions_->NewFileNumber();
   const std::string log_fname = LogFileName(dbname_, logfile_number_);
   s = env_->NewWritableFile(log_fname, &logfile_);
   if (!s.ok()) {
@@ -266,6 +334,9 @@ Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
   STRATA_DCHECK(s.ok());
 
   last_sequence_ = seq + count - 1;
+  if (versions_ != nullptr) {
+    versions_->SetLastSequence(last_sequence_);
+  }
   return s;
 }
 

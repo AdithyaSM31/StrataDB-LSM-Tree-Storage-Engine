@@ -791,5 +791,27 @@ TEST_F(DBTest, ReleaseSnapshotSafety) {
   db_->ReleaseSnapshot(snap2);
 }
 
+TEST_F(DBTest, OpenCreatesCurrentAndManifest) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Verify CURRENT exists
+  const std::string cur_path = CurrentFileName(test_dir_);
+  EXPECT_TRUE(env_->FileExists(cur_path));
+
+  // Verify MANIFEST-000001 exists
+  const std::string manifest_path = DescriptorFileName(test_dir_, 1);
+  EXPECT_TRUE(env_->FileExists(manifest_path));
+
+  // Read CURRENT and verify contents
+  std::unique_ptr<SequentialFile> cur_file;
+  ASSERT_TRUE(env_->NewSequentialFile(cur_path, &cur_file).ok());
+  char scratch[100];
+  std::string_view cur_content;
+  ASSERT_TRUE(cur_file->Read(sizeof(scratch), &cur_content, scratch).ok());
+  EXPECT_EQ(cur_content, "MANIFEST-000001\n");
+}
+
 }  // namespace
 }  // namespace strata

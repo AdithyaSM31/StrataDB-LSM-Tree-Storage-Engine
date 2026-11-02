@@ -5,7 +5,11 @@
 #include <string>
 #include <string_view>
 
+#include "strata/status.h"
+
 namespace strata {
+
+class Env;
 
 enum class FileType : uint8_t {
   kLogFile,
@@ -37,6 +41,9 @@ std::string CurrentFileName(const std::string& dbname);
 
 // Return the name of a temporary file with the specified number.
 std::string TempFileName(const std::string& dbname, uint64_t number);
+
+// Sets the CURRENT file to point to the descriptor with the specified number.
+Status SetCurrentFile(Env* env, const std::string& dbname, uint64_t descriptor_number);
 
 // If filename is a strata file, store its number in *number and its type in
 // *type and return true. Otherwise return false.
