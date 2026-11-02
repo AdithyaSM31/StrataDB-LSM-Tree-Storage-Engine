@@ -8,6 +8,7 @@
 
 #include "util/check.h"
 #include "util/coding.h"
+#include "util/comparator.h"
 
 namespace strata {
 
@@ -64,18 +65,18 @@ inline std::string MakeInternalKey(std::string_view user_key, SequenceNumber seq
 // Comparator for internal keys.
 // Compares user keys in ascending order. If equal, compares trailers in
 // descending order, so that higher sequence numbers come first.
-class InternalKeyComparator {
+class InternalKeyComparator : public Comparator {
  public:
   InternalKeyComparator() = default;
 
   // A key shorter than 8 bytes is not a valid internal key; it sorts before
   // every valid internal key, so seeking with one positions at the start.
-  int Compare(std::string_view a, std::string_view b) const;
+  int Compare(std::string_view a, std::string_view b) const override;
   int Compare(const ParsedInternalKey& a, const ParsedInternalKey& b) const;
 
   int operator()(std::string_view a, std::string_view b) const { return Compare(a, b); }
 
-  const char* Name() const { return "strata.InternalKeyComparator"; }
+  const char* Name() const override { return "strata.InternalKeyComparator"; }
 };
 
 // Helper class for looking up keys in a MemTable and SSTables.

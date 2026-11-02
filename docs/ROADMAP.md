@@ -26,8 +26,8 @@ Tick items off as they land; each one should arrive with its tests.
 
 **Milestone:** data larger than the memtable is written to L0 and read back correctly after reopen.
 
-- [ ] Block builder and block reader with prefix compression and restart points
-- [ ] Bloom filter policy, with the measured false-positive rate test
+- [x] Block builder and block reader with prefix compression and restart points
+- [x] Bloom filter policy, with the measured false-positive rate test
 - [ ] Table builder and table reader: filter, metaindex, index, footer, trailers
 - [ ] Two-level iterator (index block to data blocks)
 - [ ] Flush the immutable memtable to an L0 SSTable on a background thread
