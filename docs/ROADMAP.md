@@ -33,7 +33,7 @@ Tick items off as they land; each one should arrive with its tests.
 - [x] Flush the immutable memtable to an L0 SSTable on a background thread
 - [x] VersionEdit, VersionSet, MANIFEST and `CURRENT`, with replay on Open
 - [x] Get across memtable, immutable memtable and L0 files
-- [ ] `sst_dump` tool
+- [x] `sst_dump` tool
 
 ## Week 3 (16–22 Nov): leveled compaction and iterators
 
