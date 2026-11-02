@@ -21,7 +21,7 @@ class VersionSet;
 
 class Version {
  public:
-  explicit Version(VersionSet* vset);
+  Version() = default;
   ~Version();
 
   Version(const Version&) = delete;
@@ -45,7 +45,6 @@ class Version {
  private:
   friend class VersionSet;
 
-  VersionSet* vset_;
   Version* next_ = this;
   Version* prev_ = this;
   int refs_ = 0;
@@ -105,7 +104,6 @@ class VersionSet {
 
   Env* const env_;
   const std::string dbname_;
-  const Options* const options_;
   const InternalKeyComparator* const icmp_;
 
   uint64_t next_file_number_ = 2;

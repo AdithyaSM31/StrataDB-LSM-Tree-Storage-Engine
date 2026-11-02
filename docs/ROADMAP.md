@@ -31,7 +31,7 @@ Tick items off as they land; each one should arrive with its tests.
 - [x] Table builder and table reader: filter, metaindex, index, footer, trailers
 - [x] Two-level iterator (index block to data blocks)
 - [ ] Flush the immutable memtable to an L0 SSTable on a background thread
-- [ ] VersionEdit, VersionSet, MANIFEST and `CURRENT`, with replay on Open
+- [x] VersionEdit, VersionSet, MANIFEST and `CURRENT`, with replay on Open
 - [ ] Get across memtable, immutable memtable and L0 files
 - [ ] `sst_dump` tool
 

@@ -49,8 +49,6 @@ Status ReadFileToString(Env* env, const std::string& fname, std::string* data) {
 
 }  // namespace
 
-Version::Version(VersionSet* vset) : vset_(vset) {}
-
 Version::~Version() {
   STRATA_DCHECK(refs_ == 0);
   prev_->next_ = next_;
@@ -81,7 +79,9 @@ std::string Version::DebugString() const {
   for (int level = 0; level < kNumLevels; ++level) {
     ss << "L" << level << ": [";
     for (size_t i = 0; i < files_[level].size(); ++i) {
-      if (i > 0) ss << ", ";
+      if (i > 0) {
+        ss << ", ";
+      }
       ss << files_[level][i]->number;
     }
     ss << "] ";
@@ -178,12 +178,11 @@ VersionSet::VersionSet(std::string dbname, const Options* options,
                        const InternalKeyComparator* icmp)
     : env_(options->env == nullptr ? Env::Default() : options->env),
       dbname_(std::move(dbname)),
-      options_(options),
       icmp_(icmp),
-      dummy_versions_(this) {
+      dummy_versions_() {
   dummy_versions_.prev_ = &dummy_versions_;
   dummy_versions_.next_ = &dummy_versions_;
-  AppendVersion(new Version(this));
+  AppendVersion(new Version());
 }
 
 VersionSet::~VersionSet() {
@@ -220,7 +219,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit) {
   }
   edit->SetNextFile(next_file_number_);
 
-  auto* v = new Version(this);
+  auto* v = new Version();
   {
     Builder builder(this, current_);
     builder.Apply(edit);
@@ -256,12 +255,22 @@ Status VersionSet::LogAndApply(VersionEdit* edit) {
     if (s.ok()) {
       s = new_manifest_file->Sync();
     }
-    if (s.ok()) {
-      s = SetCurrentFile(env_, dbname_, new_manifest_number);
-    }
     if (!s.ok()) {
+      // CURRENT still names the previous MANIFEST, so this one can go.
       (void)new_manifest_file->Close();
       (void)env_->RemoveFile(manifest_fname);
+      delete v;
+      return s;
+    }
+    s = SetCurrentFile(env_, dbname_, new_manifest_number);
+    if (!s.ok()) {
+      // Never delete the new MANIFEST here: SetCurrentFile may already have
+      // renamed CURRENT to name it before failing (for example if only the
+      // directory sync failed), and deleting it would leave CURRENT pointing at
+      // nothing. Either MANIFEST describes the current state (this one holds a
+      // full snapshot of it), so whichever CURRENT names is correct. A leftover
+      // MANIFEST is harmless; obsolete-file deletion removes it later.
+      (void)new_manifest_file->Close();
       delete v;
       return s;
     }
@@ -279,6 +288,15 @@ Status VersionSet::LogAndApply(VersionEdit* edit) {
     s = descriptor_file_->Sync();
   }
   if (!s.ok()) {
+    // The MANIFEST may now end with part of this record. Appending the next
+    // edit after it would put a valid record after garbage, which recovery
+    // rightly rejects as corruption, so stop using this file. Its partial
+    // record is a torn tail that recovery drops silently, and the next
+    // LogAndApply starts a fresh MANIFEST with a full snapshot and points
+    // CURRENT at it. (DBImpl should also treat this as a sticky error.)
+    (void)descriptor_file_->Close();
+    descriptor_log_.reset();  // before the file it writes to
+    descriptor_file_.reset();
     delete v;
     return s;
   }
@@ -404,7 +422,7 @@ Status VersionSet::Recover() {
   log_number_ = log_num;
   last_sequence_ = last_seq;
 
-  auto* v = new Version(this);
+  auto* v = new Version();
   builder.SaveTo(v);
   AppendVersion(v);
 

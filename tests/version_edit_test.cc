@@ -204,5 +204,19 @@ TEST(VersionEditTest, TruncationAtEveryByte) {
   EXPECT_GT(corruption_count, 0);
 }
 
+TEST(VersionEditTest, LastSequenceAbove56BitsReturnsCorruption) {
+  std::string encoded;
+  PutVarint32(&encoded, 4);  // the last-sequence tag
+  PutVarint64(&encoded, kMaxSequenceNumber + 1);
+  VersionEdit edit;
+  EXPECT_TRUE(edit.DecodeFrom(encoded).IsCorruption());
+
+  encoded.clear();
+  PutVarint32(&encoded, 4);
+  PutVarint64(&encoded, kMaxSequenceNumber);
+  ASSERT_TRUE(edit.DecodeFrom(encoded).ok());
+  EXPECT_EQ(edit.last_sequence(), kMaxSequenceNumber);
+}
+
 }  // namespace
 }  // namespace strata

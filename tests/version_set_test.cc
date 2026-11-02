@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "db/dbformat.h"
@@ -475,6 +476,155 @@ TEST_F(VersionSetTest, EmptyOrNewlineOnlyCurrentReturnsCorruption) {
   ASSERT_TRUE(WriteStringToFile(env_, cur_path, "\r\n").ok());
   VersionSet vset3(test_dir_, &options_, &icmp_);
   EXPECT_TRUE(vset3.Recover().IsCorruption());
+}
+
+// An Env that can fail SyncDir, or one specific Append to a MANIFEST file.
+class FlakyEnv : public EnvWrapper {
+ public:
+  explicit FlakyEnv(Env* target) : EnvWrapper(target) {}
+
+  bool fail_sync_dir = false;
+  // Fail the Nth (0-based) Append made to any MANIFEST file, once.
+  int manifest_append_to_fail = -1;
+
+  Status SyncDir(const std::string& dir) override {
+    if (fail_sync_dir) {
+      return Status::IOError("injected SyncDir failure");
+    }
+    return target()->SyncDir(dir);
+  }
+
+  Status NewWritableFile(const std::string& fname, std::unique_ptr<WritableFile>* result) override {
+    Status s = target()->NewWritableFile(fname, result);
+    if (s.ok() && fname.find("MANIFEST") != std::string::npos) {
+      *result = std::make_unique<FlakyFile>(std::move(*result), this);
+    }
+    return s;
+  }
+
+ private:
+  class FlakyFile : public WritableFileWrapper {
+   public:
+    FlakyFile(std::unique_ptr<WritableFile> target, FlakyEnv* env)
+        : WritableFileWrapper(std::move(target)), env_(env) {}
+    Status Append(std::string_view data) override {
+      if (env_->manifest_appends_++ == env_->manifest_append_to_fail) {
+        env_->manifest_append_to_fail = -1;
+        return Status::IOError("injected MANIFEST append failure");
+      }
+      return WritableFileWrapper::Append(data);
+    }
+
+   private:
+    FlakyEnv* env_;
+  };
+
+  int manifest_appends_ = 0;
+};
+
+VersionEdit AddFileEdit(uint64_t number, const std::string& smallest, const std::string& largest) {
+  VersionEdit edit;
+  edit.AddFile(0, number, 100, MakeInternalKey(smallest, number, kTypeValue),
+               MakeInternalKey(largest, number, kTypeValue));
+  return edit;
+}
+
+TEST_F(VersionSetTest, FailedDirectorySyncAfterRenameKeepsDatabaseOpenable) {
+  // SetCurrentFile renames CURRENT to name the new MANIFEST, then syncs the
+  // directory. If only the sync fails, the new MANIFEST must not be deleted:
+  // CURRENT already names it.
+  ASSERT_TRUE(InitNewDB().ok());
+  FlakyEnv flaky(env_);
+  options_.env = &flaky;
+  {
+    VersionSet vset(test_dir_, &options_, &icmp_);
+    ASSERT_TRUE(vset.Recover().ok());
+    flaky.fail_sync_dir = true;
+    VersionEdit edit = AddFileEdit(10, "a", "b");
+    EXPECT_TRUE(vset.LogAndApply(&edit).IsIOError());
+    EXPECT_EQ(vset.current()->NumFiles(0), 0);  // not installed
+
+    // Once the disk recovers, the next edit succeeds and is durable.
+    flaky.fail_sync_dir = false;
+    VersionEdit retry = AddFileEdit(11, "c", "d");
+    ASSERT_TRUE(vset.LogAndApply(&retry).ok());
+  }
+  VersionSet reopened(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(reopened.Recover().ok());
+  ASSERT_EQ(reopened.current()->NumFiles(0), 1);
+  EXPECT_EQ(reopened.current()->files(0)[0]->number, 11U);
+}
+
+TEST_F(VersionSetTest, FailedDirectorySyncThenCrashStillOpens) {
+  // As above, but the process "crashes" right after the failure: whichever
+  // MANIFEST CURRENT names must exist and describe the state before the edit.
+  ASSERT_TRUE(InitNewDB().ok());
+  FlakyEnv flaky(env_);
+  options_.env = &flaky;
+  {
+    VersionSet vset(test_dir_, &options_, &icmp_);
+    ASSERT_TRUE(vset.Recover().ok());
+    flaky.fail_sync_dir = true;
+    VersionEdit edit = AddFileEdit(10, "a", "b");
+    EXPECT_TRUE(vset.LogAndApply(&edit).IsIOError());
+  }
+  flaky.fail_sync_dir = false;
+  VersionSet reopened(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(reopened.Recover().ok());
+  EXPECT_EQ(reopened.current()->NumFiles(0), 0);
+}
+
+TEST_F(VersionSetTest, FailedEditAppendStartsAFreshManifest) {
+  // The first LogAndApply creates a MANIFEST: Appends 0-1 are the snapshot
+  // record's header and payload, 2-3 the edit's. Failing Append 3 leaves just
+  // the edit's header in the file. The next edit must not be appended after
+  // it, or recovery would find a valid record after garbage.
+  ASSERT_TRUE(InitNewDB().ok());
+  FlakyEnv flaky(env_);
+  options_.env = &flaky;
+  {
+    VersionSet vset(test_dir_, &options_, &icmp_);
+    ASSERT_TRUE(vset.Recover().ok());
+    flaky.manifest_append_to_fail = 3;
+    VersionEdit failed = AddFileEdit(10, "a", "b");
+    EXPECT_TRUE(vset.LogAndApply(&failed).IsIOError());
+    const uint64_t broken_manifest = vset.ManifestFileNumber();
+
+    VersionEdit next = AddFileEdit(11, "c", "d");
+    ASSERT_TRUE(vset.LogAndApply(&next).ok());
+    EXPECT_NE(vset.ManifestFileNumber(), broken_manifest);  // a fresh MANIFEST
+  }
+  VersionSet reopened(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(reopened.Recover().ok());
+  ASSERT_EQ(reopened.current()->NumFiles(0), 1);
+  EXPECT_EQ(reopened.current()->files(0)[0]->number, 11U);
+}
+
+TEST_F(VersionSetTest, FailedEditAppendOnAnOpenManifest) {
+  // The same failure on a MANIFEST already in use: Appends 0-3 belong to the
+  // first (successful) LogAndApply, 4-5 to the second, whose payload fails.
+  ASSERT_TRUE(InitNewDB().ok());
+  FlakyEnv flaky(env_);
+  options_.env = &flaky;
+  {
+    VersionSet vset(test_dir_, &options_, &icmp_);
+    ASSERT_TRUE(vset.Recover().ok());
+    VersionEdit first = AddFileEdit(10, "a", "b");
+    ASSERT_TRUE(vset.LogAndApply(&first).ok());
+
+    flaky.manifest_append_to_fail = 5;
+    VersionEdit failed = AddFileEdit(11, "c", "d");
+    EXPECT_TRUE(vset.LogAndApply(&failed).IsIOError());
+
+    VersionEdit third = AddFileEdit(12, "e", "f");
+    ASSERT_TRUE(vset.LogAndApply(&third).ok());
+  }
+  VersionSet reopened(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(reopened.Recover().ok());
+  ASSERT_EQ(reopened.current()->NumFiles(0), 2);
+  // L0 is newest first.
+  EXPECT_EQ(reopened.current()->files(0)[0]->number, 12U);
+  EXPECT_EQ(reopened.current()->files(0)[1]->number, 10U);
 }
 
 }  // namespace

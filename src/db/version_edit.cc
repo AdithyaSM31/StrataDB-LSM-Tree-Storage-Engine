@@ -15,7 +15,7 @@ namespace strata {
 
 namespace {
 
-enum Tag : uint32_t {
+enum Tag : uint8_t {
   kComparator = 1,
   kLogNumber = 2,
   kNextFileNumber = 3,
@@ -147,6 +147,9 @@ Status VersionEdit::DecodeFrom(std::string_view src) {
         uint64_t v = 0;
         if (!GetVarint64(&input, &v)) {
           return Status::Corruption("VersionEdit: truncated last sequence");
+        }
+        if (v > kMaxSequenceNumber) {
+          return Status::Corruption("VersionEdit: last sequence exceeds 56 bits");
         }
         last_sequence_ = v;
         has_last_sequence_ = true;
