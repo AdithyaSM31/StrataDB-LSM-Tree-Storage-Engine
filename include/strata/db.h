@@ -71,7 +71,9 @@ class DB {
   // Return a handle to the current DB state. Iterators and Gets created with
   // this handle will all observe a stable snapshot of the current DB state.
   // The caller must call ReleaseSnapshot(result) when the snapshot is no
-  // longer needed.
+  // longer needed, and must release every snapshot before the DB is
+  // destroyed: the DB frees any it still holds, so a later ReleaseSnapshot
+  // would free it twice.
   virtual const Snapshot* GetSnapshot() = 0;
 
   // Release a previously acquired snapshot. The caller must not

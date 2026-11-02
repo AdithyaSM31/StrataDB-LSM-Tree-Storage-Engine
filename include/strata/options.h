@@ -52,7 +52,7 @@ struct Options {
   // Amount of data to build up in memory (backed by an unsorted log
   // on disk) before converting to a sorted on-disk file.
   // Default: 4 MB
-  size_t write_buffer_size = 4 * 1024 * 1024;
+  size_t write_buffer_size = size_t{4} * 1024 * 1024;
 
   // Approximate size of user data packed per block (before compression).
   // Default: 4 KB
@@ -68,7 +68,7 @@ struct Options {
 
   // Capacity of block cache (sharded LRU cache of uncompressed data blocks).
   // Default: 8 MB
-  size_t block_cache_capacity = 8 * 1024 * 1024;
+  size_t block_cache_capacity = size_t{8} * 1024 * 1024;
 
   // Number of open files that can be used by the DB (table cache size).
   // Default: 1000
@@ -76,7 +76,7 @@ struct Options {
 
   // Target file size for compaction outputs.
   // Default: 2 MB
-  size_t max_file_size = 2 * 1024 * 1024;
+  size_t max_file_size = size_t{2} * 1024 * 1024;
 
   // L0 file count that schedules a compaction.
   // Default: 4
@@ -92,7 +92,7 @@ struct Options {
 
   // Base level (L1) maximum total data size; each deeper level is 10x larger.
   // Default: 10 MB
-  uint64_t max_bytes_for_level_base = 10 * 1024 * 1024;
+  uint64_t max_bytes_for_level_base = uint64_t{10} * 1024 * 1024;
 
   Options() : env(Env::Default()) {}
 };

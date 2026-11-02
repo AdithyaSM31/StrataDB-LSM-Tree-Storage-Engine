@@ -1,6 +1,7 @@
 #include "db/db_impl.h"
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -291,7 +292,9 @@ Status DBImpl::Get(const ReadOptions& opts, std::string_view key, std::string* v
   const bool found = mem->Get(lkey, value, &s);
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    mem_->Unref();
+    // Release the memtable pinned above, not whatever mem_ points to now:
+    // once Write can swap mem_ (Week 2), they differ.
+    mem->Unref();
   }
 
   if (!found) {
@@ -314,7 +317,9 @@ void DBImpl::ReleaseSnapshot(const Snapshot* snapshot) {
   snapshots_.Delete(static_cast<const SnapshotImpl*>(snapshot));
 }
 
-std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*opts*/) { return nullptr; }
+std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*opts*/) {
+  return NewErrorIterator(Status::NotSupported("NewIterator is not supported in Week 1"));
+}
 
 Status DBImpl::Flush() { return Status::NotSupported("Flush is not supported in Week 1"); }
 

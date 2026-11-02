@@ -6,8 +6,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -90,6 +90,30 @@ class DBTest : public ::testing::Test {
     return s.ok() ? val : "";
   }
 
+  // Whole-file read and write through our own Env. (iostreams are avoided on
+  // purpose: GCC 13 at -O2 reports a false -Wnull-dereference inside
+  // libstdc++'s streambuf, which -Werror turns into a build failure.)
+  std::string ReadFileToString(const std::string& path) {
+    uint64_t size = 0;
+    EXPECT_TRUE(env_->GetFileSize(path, &size).ok());
+    std::unique_ptr<SequentialFile> file;
+    EXPECT_TRUE(env_->NewSequentialFile(path, &file).ok());
+    if (file == nullptr) {
+      return "";
+    }
+    std::string scratch(static_cast<size_t>(size), '\0');
+    std::string_view result;
+    EXPECT_TRUE(file->Read(scratch.size(), &result, scratch.data()).ok());
+    return std::string(result);
+  }
+
+  void WriteStringToFile(const std::string& path, std::string_view data) {
+    std::unique_ptr<WritableFile> file;
+    ASSERT_TRUE(env_->NewWritableFile(path, &file).ok());
+    ASSERT_TRUE(file->Append(data).ok());
+    ASSERT_TRUE(file->Close().ok());
+  }
+
   std::string GetNewestLogFile() {
     std::vector<std::string> children;
     Status s = env_->GetChildren(test_dir_, &children);
@@ -128,7 +152,7 @@ TEST_F(DBTest, EmptyDatabaseReturnsNotFound) {
   ASSERT_TRUE(Open(opts).ok());
 
   Status s;
-  std::string val = Get("non_existent_key", &s);
+  EXPECT_EQ(Get("non_existent_key", &s), "");
   EXPECT_TRUE(s.IsNotFound());
 }
 
@@ -167,7 +191,7 @@ TEST_F(DBTest, LargeValueSpanningBlocks100KB) {
   opts.create_if_missing = true;
   ASSERT_TRUE(Open(opts).ok());
 
-  const std::string large(100 * 1024, 'x');
+  const std::string large(size_t{100} * 1024, 'x');
   ASSERT_TRUE(Put("large_key", large).ok());
   EXPECT_EQ(Get("large_key"), large);
 }
@@ -294,9 +318,7 @@ TEST_F(DBTest, DamageInMiddleReturnsCorruption) {
   Close();
 
   // Read log file contents
-  std::ifstream in(newest_log, std::ios::binary);
-  std::string log_bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  in.close();
+  std::string log_bytes = ReadFileToString(newest_log);
 
   // Damage in the middle: flip a byte inside a record that has more records after it.
   // Record 1 is at 0, Record 2 starts after Record 1 (around byte 20-30).
@@ -304,9 +326,7 @@ TEST_F(DBTest, DamageInMiddleReturnsCorruption) {
   ASSERT_GT(log_bytes.size(), 30u);
   log_bytes[25] ^= 0x42;
 
-  std::ofstream out(newest_log, std::ios::binary | std::ios::trunc);
-  out.write(log_bytes.data(), static_cast<std::streamsize>(log_bytes.size()));
-  out.close();
+  WriteStringToFile(newest_log, log_bytes);
 
   // Open must return Corruption!
   Status s = Reopen(opts);
@@ -319,7 +339,7 @@ TEST_F(DBTest, ZeroedMiddleBlockReturnsCorruption) {
   ASSERT_TRUE(Open(opts).ok());
 
   // Write three distinct records, each ~30 KB, so the log spans across at least 3 blocks.
-  const std::string chunk(30 * 1024, 'a');
+  const std::string chunk(size_t{30} * 1024, 'a');
   ASSERT_TRUE(Put("k1", chunk).ok());
   ASSERT_TRUE(Put("k2", chunk).ok());
   ASSERT_TRUE(Put("k3", chunk).ok());
@@ -334,18 +354,14 @@ TEST_F(DBTest, ZeroedMiddleBlockReturnsCorruption) {
   ASSERT_GT(file_size, 2u * 32768);
 
   // Read full log
-  std::ifstream in(newest_log, std::ios::binary);
-  std::string log_bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  in.close();
+  std::string log_bytes = ReadFileToString(newest_log);
 
   // Zero out the entire second block (bytes 32768 to 65535)
   for (size_t i = 32768; i < 65536 && i < log_bytes.size(); ++i) {
     log_bytes[i] = '\0';
   }
 
-  std::ofstream out(newest_log, std::ios::binary | std::ios::trunc);
-  out.write(log_bytes.data(), static_cast<std::streamsize>(log_bytes.size()));
-  out.close();
+  WriteStringToFile(newest_log, log_bytes);
 
   // Open must return Corruption!
   Status s = Reopen(opts);
@@ -431,25 +447,19 @@ TEST_F(DBTest, FailedOpenReleasesLock) {
   Close();
 
   // Read log
-  std::ifstream in(newest_log, std::ios::binary);
-  std::string orig_bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  in.close();
+  const std::string orig_bytes = ReadFileToString(newest_log);
 
   // Corrupt log
   std::string corrupted = orig_bytes;
-  corrupted[0] ^= 0xff;
-  std::ofstream out(newest_log, std::ios::binary | std::ios::trunc);
-  out.write(corrupted.data(), static_cast<std::streamsize>(corrupted.size()));
-  out.close();
+  corrupted[0] = static_cast<char>(static_cast<uint8_t>(corrupted[0]) ^ 0xFFU);
+  WriteStringToFile(newest_log, corrupted);
 
   // Open should fail due to corruption
   Status s = Reopen(opts);
   EXPECT_TRUE(s.IsCorruption());
 
   // Repair the log
-  std::ofstream repair(newest_log, std::ios::binary | std::ios::trunc);
-  repair.write(orig_bytes.data(), static_cast<std::streamsize>(orig_bytes.size()));
-  repair.close();
+  WriteStringToFile(newest_log, orig_bytes);
 
   // Next open must succeed and not report "lock held"
   s = Reopen(opts);
@@ -634,7 +644,10 @@ TEST_F(DBTest, FutureMethodsReturnNotSupported) {
 
   EXPECT_TRUE(db_->Flush().IsNotSupported());
   EXPECT_TRUE(db_->CompactRange("a", "z").IsNotSupported());
-  EXPECT_EQ(db_->NewIterator(ReadOptions()), nullptr);
+  std::unique_ptr<Iterator> it = db_->NewIterator(ReadOptions());
+  ASSERT_NE(it, nullptr);
+  EXPECT_FALSE(it->Valid());
+  EXPECT_TRUE(it->status().IsNotSupported());
 
   std::string prop;
   EXPECT_FALSE(db_->GetProperty("strata.stats", &prop));

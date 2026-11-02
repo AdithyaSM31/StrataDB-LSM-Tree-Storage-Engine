@@ -1,6 +1,7 @@
 #ifndef STRATA_INCLUDE_ITERATOR_H_
 #define STRATA_INCLUDE_ITERATOR_H_
 
+#include <memory>
 #include <string_view>
 
 #include "strata/status.h"
@@ -58,6 +59,13 @@ class Iterator {
   // If an error has occurred, return it. Else return an ok status.
   virtual Status status() const = 0;
 };
+
+// Returns an iterator over nothing: never Valid(), and status() is OK.
+std::unique_ptr<Iterator> NewEmptyIterator();
+
+// Returns an iterator over nothing whose status() is `status`. Used to report
+// an error (or an unsupported operation) through the Iterator interface.
+std::unique_ptr<Iterator> NewErrorIterator(const Status& status);
 
 }  // namespace strata
 
