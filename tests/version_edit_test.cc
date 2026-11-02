@@ -126,6 +126,14 @@ TEST(VersionEditTest, BadLevelReturnsCorruption) {
 
   s = edit.DecodeFrom(buf);
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+
+  // Negative level encoded as uint32_t
+  buf.clear();
+  PutVarint32(&buf, 5);
+  PutVarint32(&buf, static_cast<uint32_t>(-1));
+  PutVarint64(&buf, 10);
+  s = edit.DecodeFrom(buf);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
 }
 
 TEST(VersionEditTest, BadInternalKeyReturnsCorruption) {

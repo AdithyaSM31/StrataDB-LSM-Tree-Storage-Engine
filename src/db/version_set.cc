@@ -191,6 +191,7 @@ VersionSet::~VersionSet() {
     current_->Unref();
     current_ = nullptr;
   }
+  STRATA_DCHECK(dummy_versions_.next_ == &dummy_versions_);
 }
 
 void VersionSet::AppendVersion(Version* v) {
@@ -210,13 +211,11 @@ void VersionSet::AppendVersion(Version* v) {
 
 Status VersionSet::LogAndApply(VersionEdit* edit) {
   if (edit->has_log_number()) {
-    log_number_ = edit->log_number();
+    MarkFileNumberUsed(edit->log_number());
   } else {
     edit->SetLogNumber(log_number_);
   }
-  if (edit->has_last_sequence()) {
-    SetLastSequence(edit->last_sequence());
-  } else {
+  if (!edit->has_last_sequence()) {
     edit->SetLastSequence(last_sequence_);
   }
   edit->SetNextFile(next_file_number_);
@@ -235,6 +234,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit) {
     std::unique_ptr<WritableFile> new_manifest_file;
     s = env_->NewWritableFile(manifest_fname, &new_manifest_file);
     if (!s.ok()) {
+      ReuseFileNumber(new_manifest_number);
       delete v;
       return s;
     }
@@ -242,6 +242,9 @@ Status VersionSet::LogAndApply(VersionEdit* edit) {
 
     VersionEdit snapshot;
     snapshot.SetComparatorName(icmp_->Name());
+    snapshot.SetLogNumber(log_number_);
+    snapshot.SetNextFile(next_file_number_);
+    snapshot.SetLastSequence(last_sequence_);
     for (int level = 0; level < kNumLevels; ++level) {
       for (const auto* f : current_->files_[level]) {
         snapshot.AddFile(level, f->number, f->file_size, f->smallest, f->largest);
@@ -280,6 +283,13 @@ Status VersionSet::LogAndApply(VersionEdit* edit) {
     return s;
   }
 
+  if (edit->has_log_number()) {
+    log_number_ = edit->log_number();
+  }
+  if (edit->has_last_sequence()) {
+    SetLastSequence(edit->last_sequence());
+  }
+
   AppendVersion(v);
   return Status::OK();
 }
@@ -299,17 +309,20 @@ Status VersionSet::Recover() {
   if (!manifest_name.empty() && manifest_name.back() == '\r') {
     manifest_name.remove_suffix(1);
   }
-
-  const std::string manifest_path = dbname_ + "/" + std::string(manifest_name);
-  if (!env_->FileExists(manifest_path)) {
-    return Status::Corruption(manifest_path, "MANIFEST file referenced by CURRENT does not exist");
+  if (manifest_name.empty()) {
+    return Status::Corruption("CURRENT file is empty");
   }
 
   uint64_t manifest_num = 0;
   FileType type;
-  if (ParseFileName(manifest_name, &manifest_num, &type) && type == FileType::kDescriptorFile) {
-    manifest_file_number_ = manifest_num;
-    MarkFileNumberUsed(manifest_num);
+  if (!ParseFileName(manifest_name, &manifest_num, &type) || type != FileType::kDescriptorFile) {
+    return Status::Corruption(manifest_name,
+                              "CURRENT file does not reference a valid MANIFEST file");
+  }
+
+  const std::string manifest_path = dbname_ + "/" + std::string(manifest_name);
+  if (!env_->FileExists(manifest_path)) {
+    return Status::Corruption(manifest_path, "MANIFEST file referenced by CURRENT does not exist");
   }
 
   std::unique_ptr<SequentialFile> file;
@@ -384,8 +397,10 @@ Status VersionSet::Recover() {
     return Status::Corruption("MANIFEST missing required counters");
   }
 
-  MarkFileNumberUsed(log_num);
+  manifest_file_number_ = manifest_num;
   next_file_number_ = next_file;
+  MarkFileNumberUsed(log_num);
+  MarkFileNumberUsed(manifest_file_number_);
   log_number_ = log_num;
   last_sequence_ = last_seq;
 

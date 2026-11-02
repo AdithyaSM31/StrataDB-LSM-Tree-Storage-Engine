@@ -8,6 +8,7 @@
 
 #include "db/dbformat.h"
 #include "strata/status.h"
+#include "util/check.h"
 #include "util/coding.h"
 
 namespace strata {
@@ -60,6 +61,7 @@ void VersionEdit::SetLastSequence(SequenceNumber s) {
 
 void VersionEdit::AddFile(int level, uint64_t number, uint64_t size, std::string_view smallest,
                           std::string_view largest) {
+  STRATA_DCHECK(level >= 0 && level < kNumLevels);
   FileMetaData f;
   f.number = number;
   f.file_size = size;
@@ -69,6 +71,7 @@ void VersionEdit::AddFile(int level, uint64_t number, uint64_t size, std::string
 }
 
 void VersionEdit::RemoveFile(int level, uint64_t number) {
+  STRATA_DCHECK(level >= 0 && level < kNumLevels);
   deleted_files_.emplace_back(level, number);
 }
 

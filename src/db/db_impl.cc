@@ -143,7 +143,7 @@ Status DBImpl::Recover() {
     if (!options_.create_if_missing && logs.empty()) {
       return Status::InvalidArgument(dbname_, "does not exist (create_if_missing is false)");
     }
-    if (options_.error_if_exists && (current_exists || !logs.empty())) {
+    if (options_.error_if_exists && !logs.empty()) {
       return Status::InvalidArgument(dbname_, "exists (error_if_exists is true)");
     }
     s = NewDB();

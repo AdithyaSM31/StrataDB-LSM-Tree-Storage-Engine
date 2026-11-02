@@ -5,7 +5,6 @@
 
 #include <atomic>
 #include <filesystem>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -43,6 +42,22 @@ static Status ReadFileToString(Env* env, const std::string& fname, std::string* 
     }
   }
   return Status::OK();
+}
+
+static Status WriteStringToFile(Env* env, const std::string& fname, std::string_view data) {
+  std::unique_ptr<WritableFile> file;
+  Status s = env->NewWritableFile(fname, &file);
+  if (!s.ok()) {
+    return s;
+  }
+  s = file->Append(data);
+  if (s.ok()) {
+    s = file->Sync();
+  }
+  if (s.ok()) {
+    s = file->Close();
+  }
+  return s;
 }
 
 class VersionSetTest : public ::testing::Test {
@@ -278,17 +293,14 @@ TEST_F(VersionSetTest, DamageInMiddleReturnsCorruption) {
   }
   std::string manifest_path = test_dir_ + "/" + current_content;
 
-  std::ifstream in(manifest_path, std::ios::binary);
-  std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  in.close();
+  std::string data;
+  ASSERT_TRUE(ReadFileToString(env_, manifest_path, &data).ok());
 
   // Flip a byte in the middle of data (at 1/3 of the length)
   ASSERT_GT(data.size(), 30u);
   data[data.size() / 3] ^= 0x5a;
 
-  std::ofstream out(manifest_path, std::ios::binary | std::ios::trunc);
-  out.write(data.data(), static_cast<std::streamsize>(data.size()));
-  out.close();
+  ASSERT_TRUE(WriteStringToFile(env_, manifest_path, data).ok());
 
   VersionSet vset2(test_dir_, &options_, &icmp_);
   Status s = vset2.Recover();
@@ -300,9 +312,7 @@ TEST_F(VersionSetTest, CurrentWithoutNewlineReturnsCorruption) {
 
   // Overwrite CURRENT without a trailing newline
   const std::string cur_path = CurrentFileName(test_dir_);
-  std::ofstream out(cur_path, std::ios::binary | std::ios::trunc);
-  out << "MANIFEST-000001";  // No newline!
-  out.close();
+  ASSERT_TRUE(WriteStringToFile(env_, cur_path, "MANIFEST-000001").ok());
 
   VersionSet vset(test_dir_, &options_, &icmp_);
   Status s = vset.Recover();
@@ -314,9 +324,7 @@ TEST_F(VersionSetTest, CurrentNamingMissingManifestReturnsError) {
 
   // Overwrite CURRENT to point to non-existent manifest
   const std::string cur_path = CurrentFileName(test_dir_);
-  std::ofstream out(cur_path, std::ios::binary | std::ios::trunc);
-  out << "MANIFEST-999999\n";
-  out.close();
+  ASSERT_TRUE(WriteStringToFile(env_, cur_path, "MANIFEST-999999\n").ok());
 
   VersionSet vset(test_dir_, &options_, &icmp_);
   Status s = vset.Recover();
@@ -390,6 +398,83 @@ TEST_F(VersionSetTest, CrashBetweenWritingManifestAndRenamingCurrent) {
   ASSERT_TRUE(vset2.Recover().ok());
   ASSERT_EQ(vset2.current()->NumFiles(0), 1);
   EXPECT_EQ(vset2.current()->files(0)[0]->number, 10u);
+}
+
+TEST_F(VersionSetTest, CrashBetweenWritingSnapshotAndWritingEdit) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  VersionSet vset(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset.Recover().ok());
+
+  std::string ka = MakeInternalKey("a", 1, kTypeValue);
+  std::string kz = MakeInternalKey("z", 1, kTypeValue);
+  VersionEdit edit1;
+  edit1.AddFile(0, 10, 100, ka, kz);
+  edit1.SetLogNumber(4);
+  edit1.SetLastSequence(40);
+  ASSERT_TRUE(vset.LogAndApply(&edit1).ok());
+
+  // Simulate a restart: a new VersionSet is opened and recovered.
+  // descriptor_log_ is null until the first LogAndApply.
+  VersionSet vset2(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset2.Recover().ok());
+  ASSERT_EQ(vset2.current()->NumFiles(0), 1);
+  EXPECT_EQ(vset2.LogNumber(), 4u);
+  EXPECT_EQ(vset2.LastSequence(), 40u);
+
+  // Now simulate a crash in LogAndApply after writing snapshot and renaming CURRENT (step 3),
+  // but BEFORE appending the delta edit (step 4).
+  const uint64_t manifest3_num = vset2.NewFileNumber();
+  const std::string manifest3_path = DescriptorFileName(test_dir_, manifest3_num);
+  std::unique_ptr<WritableFile> f3;
+  ASSERT_TRUE(env_->NewWritableFile(manifest3_path, &f3).ok());
+  log::Writer w3(f3.get());
+
+  VersionEdit snapshot;
+  snapshot.SetComparatorName(icmp_.Name());
+  snapshot.SetLogNumber(vset2.LogNumber());
+  snapshot.SetNextFile(vset2.NextFileNumber());
+  snapshot.SetLastSequence(vset2.LastSequence());
+  snapshot.AddFile(0, 10, 100, ka, kz);
+
+  std::string snapshot_rec;
+  snapshot.EncodeTo(&snapshot_rec);
+  ASSERT_TRUE(w3.AddRecord(snapshot_rec).ok());
+  ASSERT_TRUE(f3->Sync().ok());
+  ASSERT_TRUE(f3->Close().ok());
+
+  // Point CURRENT to MANIFEST-000003 and crash before writing the delta edit!
+  ASSERT_TRUE(SetCurrentFile(env_, test_dir_, manifest3_num).ok());
+
+  // Fresh recovery must succeed and cleanly restore the snapshot state.
+  VersionSet vset3(test_dir_, &options_, &icmp_);
+  ASSERT_TRUE(vset3.Recover().ok());
+  ASSERT_EQ(vset3.current()->NumFiles(0), 1);
+  EXPECT_EQ(vset3.current()->files(0)[0]->number, 10u);
+  EXPECT_EQ(vset3.LogNumber(), 4u);
+  EXPECT_EQ(vset3.LastSequence(), 40u);
+  EXPECT_GE(vset3.NextFileNumber(), manifest3_num + 1);
+}
+
+TEST_F(VersionSetTest, EmptyOrNewlineOnlyCurrentReturnsCorruption) {
+  ASSERT_TRUE(InitNewDB().ok());
+
+  const std::string cur_path = CurrentFileName(test_dir_);
+
+  // Case 1: Empty file
+  ASSERT_TRUE(WriteStringToFile(env_, cur_path, "").ok());
+  VersionSet vset1(test_dir_, &options_, &icmp_);
+  EXPECT_TRUE(vset1.Recover().IsCorruption());
+
+  // Case 2: Only newline
+  ASSERT_TRUE(WriteStringToFile(env_, cur_path, "\n").ok());
+  VersionSet vset2(test_dir_, &options_, &icmp_);
+  EXPECT_TRUE(vset2.Recover().IsCorruption());
+
+  // Case 3: Only CRLF
+  ASSERT_TRUE(WriteStringToFile(env_, cur_path, "\r\n").ok());
+  VersionSet vset3(test_dir_, &options_, &icmp_);
+  EXPECT_TRUE(vset3.Recover().IsCorruption());
 }
 
 }  // namespace
