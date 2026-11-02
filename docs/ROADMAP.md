@@ -16,7 +16,7 @@ Tick items off as they land; each one should arrive with its tests.
 - [ ] `Status`, varint/fixed coding, CRC32C, arena, hash, random
 - [ ] `Env` interface and `PosixEnv` (`pread`, `write`, `fdatasync`, `rename`, directory fsync, `flock`)
 - [ ] Skiplist with atomic next-pointers, including the concurrent reader test
-- [ ] Internal key format, comparator, MemTable and MemTable iterator
+- [x] Internal key format, comparator, MemTable and MemTable iterator
 - [ ] WriteBatch (8-byte sequence, 4-byte count, then records)
 - [ ] Log writer and reader, with truncation and bit-flip tests
 - [ ] Minimal `DBImpl`: write goes to WAL then memtable; Open replays the WAL
