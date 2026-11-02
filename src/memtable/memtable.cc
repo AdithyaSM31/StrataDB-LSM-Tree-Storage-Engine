@@ -38,6 +38,12 @@ void MemTable::Unref() {
 
 size_t MemTable::ApproximateMemoryUsage() const { return arena_.MemoryUsage(); }
 
+bool MemTable::IsEmpty() const {
+  SkipList<const char*, KeyComparator>::Iterator iter(&table_);
+  iter.SeekToFirst();
+  return !iter.Valid();
+}
+
 void MemTable::Add(SequenceNumber seq, ValueType type, std::string_view key,
                    std::string_view value) {
   STRATA_DCHECK(seq <= kMaxSequenceNumber);

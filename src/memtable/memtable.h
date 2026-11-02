@@ -31,6 +31,9 @@ class MemTable {
 
   size_t ApproximateMemoryUsage() const;  // arena_.MemoryUsage()
 
+  // true iff the memtable has no entries
+  bool IsEmpty() const;
+
   // REQUIRES: one writer at a time (the write leader).
   void Add(SequenceNumber seq, ValueType type, std::string_view key, std::string_view value);
 

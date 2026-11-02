@@ -12,6 +12,7 @@
 
 #include "db/dbformat.h"
 #include "db/filename.h"
+#include "db/table_cache.h"
 #include "db/version_edit.h"
 #include "log/log_reader.h"
 #include "log/log_writer.h"
@@ -71,6 +72,87 @@ void Version::Unref() {
   if (refs_ == 0) {
     delete this;
   }
+}
+
+Status Version::Get(const LookupKey& key, std::string* value, TableCache* cache) const {
+  std::string_view user_key = key.user_key();
+
+  // Search L0 files, newest first (files_[0] is already sorted newest first by number)
+  for (const FileMetaData* f : files_[0]) {
+    std::string_view smallest_user = ExtractUserKey(f->smallest);
+    std::string_view largest_user = ExtractUserKey(f->largest);
+    if (user_key.compare(smallest_user) < 0 || user_key.compare(largest_user) > 0) {
+      continue;
+    }
+    std::shared_ptr<Table> table;
+    Status s = cache->FindTable(f->number, f->file_size, &table);
+    if (!s.ok()) {
+      return s;
+    }
+    bool found = false;
+    std::string k;
+    std::string v;
+    s = table->InternalGet(key.internal_key(), &found, &k, &v);
+    if (!s.ok()) {
+      return s;
+    }
+    if (found && ExtractUserKey(k) == user_key) {
+      ParsedInternalKey parsed;
+      if (!ParseInternalKey(k, &parsed)) {
+        return Status::Corruption("corrupted internal key in table");
+      }
+      if (parsed.type == kTypeValue) {
+        *value = std::move(v);
+        return Status::OK();
+      } else if (parsed.type == kTypeDeletion) {
+        return Status::NotFound("key deleted");
+      }
+    }
+  }
+
+  // Search L1 and below
+  for (int level = 1; level < kNumLevels; ++level) {
+    if (files_[level].empty()) {
+      continue;
+    }
+    auto it = std::lower_bound(files_[level].begin(), files_[level].end(), key.internal_key(),
+                               [this](const FileMetaData* f, std::string_view ikey) {
+                                 return vset_->icmp().Compare(f->largest, ikey) < 0;
+                               });
+    if (it != files_[level].end()) {
+      const FileMetaData* f = *it;
+      std::string_view smallest_user = ExtractUserKey(f->smallest);
+      std::string_view largest_user = ExtractUserKey(f->largest);
+      if (user_key.compare(smallest_user) >= 0 && user_key.compare(largest_user) <= 0) {
+        std::shared_ptr<Table> table;
+        Status s = cache->FindTable(f->number, f->file_size, &table);
+        if (!s.ok()) {
+          return s;
+        }
+        bool found = false;
+        std::string k;
+        std::string v;
+        s = table->InternalGet(key.internal_key(), &found, &k, &v);
+        if (!s.ok()) {
+          return s;
+        }
+        if (found && ExtractUserKey(k) == user_key) {
+          ParsedInternalKey parsed;
+          if (!ParseInternalKey(k, &parsed)) {
+            return Status::Corruption("corrupted internal key in table");
+          }
+          if (parsed.type == kTypeValue) {
+            *value = std::move(v);
+            return Status::OK();
+          } else if (parsed.type == kTypeDeletion) {
+            return Status::NotFound("key deleted");
+          }
+        }
+      }
+    }
+  }
+
+  return Status::NotFound("key not found");
 }
 
 std::string Version::DebugString() const {
@@ -427,6 +509,16 @@ Status VersionSet::Recover() {
   AppendVersion(v);
 
   return Status::OK();
+}
+
+void VersionSet::AddLiveFiles(std::set<uint64_t>* live) const {
+  for (const Version* v = dummy_versions_.next_; v != &dummy_versions_; v = v->next_) {
+    for (int level = 0; level < kNumLevels; ++level) {
+      for (const FileMetaData* f : v->files_[level]) {
+        live->insert(f->number);
+      }
+    }
+  }
 }
 
 }  // namespace strata

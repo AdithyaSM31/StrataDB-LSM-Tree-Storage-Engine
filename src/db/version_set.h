@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +18,7 @@
 
 namespace strata {
 
+class TableCache;
 class VersionSet;
 
 class Version {
@@ -30,6 +32,8 @@ class Version {
   void Ref() { ++refs_; }
   void Unref();
 
+  Status Get(const LookupKey& key, std::string* value, TableCache* cache) const;
+
   const std::vector<FileMetaData*>& files(int level) const {
     STRATA_DCHECK(level >= 0 && level < kNumLevels);
     return files_[level];
@@ -39,6 +43,8 @@ class Version {
     STRATA_DCHECK(level >= 0 && level < kNumLevels);
     return static_cast<int>(files_[level].size());
   }
+
+  int NumLevelFiles(int level) const { return NumFiles(level); }
 
   std::string DebugString() const;
 
@@ -95,6 +101,9 @@ class VersionSet {
   }
 
   const InternalKeyComparator& icmp() const { return *icmp_; }
+
+  void AddLiveFiles(std::set<uint64_t>* live) const;
+  int NumLevelFiles(int level) const { return current_->NumFiles(level); }
 
  private:
   class Builder;

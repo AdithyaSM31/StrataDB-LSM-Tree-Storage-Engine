@@ -135,6 +135,23 @@ class DBTest : public ::testing::Test {
     return LogFileName(test_dir_, logs.back());
   }
 
+  int CountFiles(FileType target_type) {
+    std::vector<std::string> children;
+    Status s = env_->GetChildren(test_dir_, &children);
+    if (!s.ok()) {
+      return 0;
+    }
+    int count = 0;
+    for (const auto& name : children) {
+      uint64_t num;
+      FileType type;
+      if (ParseFileName(name, &num, &type) && type == target_type) {
+        ++count;
+      }
+    }
+    return count;
+  }
+
   Env* env_ = nullptr;
   std::unique_ptr<Env> custom_env_;
   std::string test_dir_;
@@ -257,7 +274,7 @@ TEST_F(DBTest, FiveReopenCycles) {
     EXPECT_EQ(Get("k" + std::to_string(i)), "v" + std::to_string(i));
   }
 
-  // Verify that log files keep increasing in number.
+  // Verify that obsolete log files were deleted (the Week 1 pile-up ends).
   std::vector<std::string> children;
   ASSERT_TRUE(env_->GetChildren(test_dir_, &children).ok());
   int log_count = 0;
@@ -268,8 +285,8 @@ TEST_F(DBTest, FiveReopenCycles) {
       log_count++;
     }
   }
-  // With 1 initial open + 5 reopens, there should be 6 log files.
-  EXPECT_GE(log_count, 6);
+  // With obsolete files deleted at the end of Open, only 1 active log file remains.
+  EXPECT_EQ(log_count, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +346,7 @@ TEST_F(DBTest, DamageInMiddleReturnsCorruption) {
   WriteStringToFile(newest_log, log_bytes);
 
   // Open must return Corruption!
+  opts.paranoid_checks = true;
   Status s = Reopen(opts);
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
 }
@@ -364,6 +382,7 @@ TEST_F(DBTest, ZeroedMiddleBlockReturnsCorruption) {
   WriteStringToFile(newest_log, log_bytes);
 
   // Open must return Corruption!
+  opts.paranoid_checks = true;
   Status s = Reopen(opts);
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
 }
@@ -455,6 +474,7 @@ TEST_F(DBTest, FailedOpenReleasesLock) {
   WriteStringToFile(newest_log, corrupted);
 
   // Open should fail due to corruption
+  opts.paranoid_checks = true;
   Status s = Reopen(opts);
   EXPECT_TRUE(s.IsCorruption());
 
@@ -642,7 +662,7 @@ TEST_F(DBTest, FutureMethodsReturnNotSupported) {
   opts.create_if_missing = true;
   ASSERT_TRUE(Open(opts).ok());
 
-  EXPECT_TRUE(db_->Flush().IsNotSupported());
+  EXPECT_TRUE(db_->Flush().ok());
   EXPECT_TRUE(db_->CompactRange("a", "z").IsNotSupported());
   std::unique_ptr<Iterator> it = db_->NewIterator(ReadOptions());
   ASSERT_NE(it, nullptr);
@@ -760,6 +780,7 @@ TEST_F(DBTest, SequenceNumberOverflowInLogFailsWithCorruption) {
 
   Options opts;
   opts.create_if_missing = false;
+  opts.paranoid_checks = true;
   Status s = Open(opts);
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
 }
@@ -811,6 +832,364 @@ TEST_F(DBTest, OpenCreatesCurrentAndManifest) {
   std::string_view cur_content;
   ASSERT_TRUE(cur_file->Read(sizeof(scratch), &cur_content, scratch).ok());
   EXPECT_EQ(cur_content, "MANIFEST-000001\n");
+}
+
+// ---------------------------------------------------------------------------
+// Week 2: Flush, L0 SSTables, Reading across MemTable/Imm/L0
+// ---------------------------------------------------------------------------
+
+TEST_F(DBTest, MilestoneFlushAcrossReopen) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 4096;  // 4 KB buffer forces frequent flushes
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Write 2,000 keys of 100 bytes each
+  const std::string val_100(100, 'x');
+  for (int i = 0; i < 2000; ++i) {
+    char key_buf[32];
+    std::snprintf(key_buf, sizeof(key_buf), "k%05d", i);
+    ASSERT_TRUE(Put(key_buf, val_100).ok());
+  }
+
+  // Several .sst files must appear
+  EXPECT_GT(CountFiles(FileType::kTableFile), 1);
+
+  // Every key reads back correctly
+  for (int i = 0; i < 2000; ++i) {
+    char key_buf[32];
+    std::snprintf(key_buf, sizeof(key_buf), "k%05d", i);
+    EXPECT_EQ(Get(key_buf), val_100);
+  }
+
+  // Close and reopen
+  opts.create_if_missing = false;
+  ASSERT_TRUE(Reopen(opts).ok());
+
+  // Still reads back correctly after reopen
+  for (int i = 0; i < 2000; ++i) {
+    char key_buf[32];
+    std::snprintf(key_buf, sizeof(key_buf), "k%05d", i);
+    EXPECT_EQ(Get(key_buf), val_100);
+  }
+}
+
+TEST_F(DBTest, FlushOperation) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("hello", "world").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_EQ(Get("hello"), "world");
+
+  // An .sst file exists
+  EXPECT_GE(CountFiles(FileType::kTableFile), 1);
+
+  // And old log is gone: exactly one log file remains (the new active log)
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1);
+}
+
+TEST_F(DBTest, NewerDataHidesOlderDataAcrossLayers) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("k", "v1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  ASSERT_TRUE(Put("k", "v2").ok());
+  // v2 from active memtable
+  EXPECT_EQ(Get("k"), "v2");
+
+  ASSERT_TRUE(db_->Flush().ok());
+  // still v2, from the newer L0 file
+  EXPECT_EQ(Get("k"), "v2");
+}
+
+TEST_F(DBTest, TombstoneHidesAcrossFiles) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("k", "value_to_delete").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  ASSERT_TRUE(Delete("k").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  Status s;
+  Get("k", &s);
+  EXPECT_TRUE(s.IsNotFound()) << s.ToString();
+}
+
+TEST_F(DBTest, SnapshotsAcrossFlush) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("k", "v1").ok());
+  const Snapshot* snap = db_->GetSnapshot();
+  ASSERT_NE(snap, nullptr);
+
+  ASSERT_TRUE(Put("k", "v2").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // Reading at snapshot returns v1
+  ReadOptions ropts;
+  ropts.snapshot = snap;
+  Status s;
+  EXPECT_EQ(Get("k", &s, ropts), "v1");
+  EXPECT_TRUE(s.ok());
+
+  // Reading without snapshot returns v2
+  EXPECT_EQ(Get("k"), "v2");
+
+  db_->ReleaseSnapshot(snap);
+}
+
+TEST_F(DBTest, RecoveryFlush) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  for (int i = 0; i < 50; ++i) {
+    char key_buf[32];
+    std::snprintf(key_buf, sizeof(key_buf), "rec_key_%02d", i);
+    ASSERT_TRUE(Put(key_buf, "val").ok());
+  }
+
+  // Close WITHOUT calling Flush()
+  Close();
+
+  // Reopen
+  opts.create_if_missing = false;
+  ASSERT_TRUE(Reopen(opts).ok());
+
+  // Data is now in L0, and only one log and one MANIFEST remain
+  EXPECT_GE(CountFiles(FileType::kTableFile), 1);
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1);
+  EXPECT_EQ(CountFiles(FileType::kDescriptorFile), 1);
+
+  for (int i = 0; i < 50; ++i) {
+    char key_buf[32];
+    std::snprintf(key_buf, sizeof(key_buf), "rec_key_%02d", i);
+    EXPECT_EQ(Get(key_buf), "val");
+  }
+}
+
+TEST_F(DBTest, Week1TrapFixedCorruptionPolicy) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("k1", "v1").ok());
+  ASSERT_TRUE(Put("k2", "v2").ok());
+  ASSERT_TRUE(Put("k3", "v3").ok());
+
+  std::string newest_log = GetNewestLogFile();
+  ASSERT_FALSE(newest_log.empty());
+
+  Close();
+
+  std::string log_bytes = ReadFileToString(newest_log);
+  ASSERT_GT(log_bytes.size(), 40u);
+  // Damage record 2 in the middle (record 1 is [0..25], record 2 starts at 26)
+  log_bytes[35] ^= 0x42;
+  WriteStringToFile(newest_log, log_bytes);
+
+  // With paranoid_checks = true: fail Open with Corruption
+  Options paranoid_opts = opts;
+  paranoid_opts.create_if_missing = false;
+  paranoid_opts.paranoid_checks = true;
+  Status s = Reopen(paranoid_opts);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+
+  // With paranoid_checks = false (default): keep prefix and succeed Open
+  Options non_paranoid_opts = opts;
+  non_paranoid_opts.create_if_missing = false;
+  non_paranoid_opts.paranoid_checks = false;
+  ASSERT_TRUE(Reopen(non_paranoid_opts).ok());
+
+  // Prefix (k1) is kept
+  EXPECT_EQ(Get("k1"), "v1");
+
+  // Write new data
+  ASSERT_TRUE(Put("k_new", "v_new").ok());
+
+  // Reopen again and both must be there
+  Close();
+  ASSERT_TRUE(Reopen(non_paranoid_opts).ok());
+  EXPECT_EQ(Get("k1"), "v1");
+  EXPECT_EQ(Get("k_new"), "v_new");
+}
+
+class FailingSstEnv : public EnvWrapper {
+ public:
+  explicit FailingSstEnv(Env* target) : EnvWrapper(target) {}
+
+  Status NewWritableFile(const std::string& fname, std::unique_ptr<WritableFile>* result) override {
+    uint64_t number = 0;
+    FileType type;
+    std::string_view basename = fname;
+    const auto slash = basename.rfind('/');
+    if (slash != std::string_view::npos) {
+      basename.remove_prefix(slash + 1);
+    }
+    if (fail_sst_.load() && ParseFileName(basename, &number, &type) &&
+        type == FileType::kTableFile) {
+      std::unique_ptr<WritableFile> base_file;
+      Status s = EnvWrapper::NewWritableFile(fname, &base_file);
+      if (!s.ok()) {
+        return s;
+      }
+      *result = std::make_unique<FailingWritableFile>(std::move(base_file), /*fail_after=*/0);
+      return Status::OK();
+    }
+    return EnvWrapper::NewWritableFile(fname, result);
+  }
+
+  void SetFailSst(bool fail) { fail_sst_.store(fail); }
+
+ private:
+  std::atomic<bool> fail_sst_{false};
+};
+
+TEST_F(DBTest, StickyBackgroundError) {
+  auto flaky_env = std::make_unique<FailingSstEnv>(Env::Default());
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = flaky_env.get();
+  opts.write_buffer_size = 4096;
+
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("k_initial", "v_initial").ok());
+
+  // Cause future SST appends to fail
+  flaky_env->SetFailSst(true);
+
+  // Trigger flush
+  Status s = db_->Flush();
+  EXPECT_FALSE(s.ok());
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+
+  // Subsequent writes return IOError and keep returning it
+  Status s2 = Put("k_after", "v_after");
+  EXPECT_FALSE(s2.ok());
+  EXPECT_TRUE(s2.IsIOError()) << s2.ToString();
+
+  Status s3 = Put("k_another", "v_another");
+  EXPECT_FALSE(s3.ok());
+  EXPECT_TRUE(s3.IsIOError()) << s3.ToString();
+
+  // Data written earlier still reads back
+  EXPECT_EQ(Get("k_initial"), "v_initial");
+
+  Close();
+}
+
+TEST_F(DBTest, ConcurrencyWritesReadsFlushes) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 2048;  // frequent flushes
+  ASSERT_TRUE(Open(opts).ok());
+
+  std::atomic<bool> stop{false};
+  constexpr int kNumKeys = 500;
+
+  // Writer thread
+  std::thread writer([this, &stop]() {
+    for (int i = 0; i < kNumKeys && !stop.load(); ++i) {
+      char key[32];
+      char val[64];
+      std::snprintf(key, sizeof(key), "concur_%04d", i);
+      std::snprintf(val, sizeof(val), "val_%04d", i);
+      (void)Put(key, val);
+    }
+  });
+
+  // Reader thread
+  std::thread reader([this, &stop]() {
+    while (!stop.load()) {
+      for (int i = 0; i < 50; ++i) {
+        char key[32];
+        std::snprintf(key, sizeof(key), "concur_%04d", i);
+        Status s;
+        std::string v = Get(key, &s);
+        if (s.ok()) {
+          char expected_prefix[32];
+          std::snprintf(expected_prefix, sizeof(expected_prefix), "val_%04d", i);
+          EXPECT_EQ(v, expected_prefix);
+        }
+      }
+    }
+  });
+
+  writer.join();
+  stop.store(true);
+  reader.join();
+
+  // All written keys read back
+  for (int i = 0; i < kNumKeys; ++i) {
+    char key[32];
+    char expected_val[64];
+    std::snprintf(key, sizeof(key), "concur_%04d", i);
+    std::snprintf(expected_val, sizeof(expected_val), "val_%04d", i);
+    EXPECT_EQ(Get(key), expected_val);
+  }
+}
+
+TEST_F(DBTest, ProcessCrashDuringFlushes) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 4096;
+
+  // Open and close once to establish the DB
+  ASSERT_TRUE(Open(opts).ok());
+  Close();
+
+  pid_t pid = ::fork();
+  ASSERT_NE(pid, -1);
+
+  if (pid == 0) {
+    // Child process: open DB, write many keys with sync to ensure durability before crash
+    std::unique_ptr<DB> child_db;
+    if (!DB::Open(opts, test_dir_, &child_db).ok()) {
+      ::_exit(1);
+    }
+    WriteOptions wo;
+    wo.sync = true;
+    for (int i = 0; i < 300; ++i) {
+      char key[32];
+      char val[64];
+      std::snprintf(key, sizeof(key), "crash_k_%04d", i);
+      std::snprintf(val, sizeof(val), "crash_v_%04d", i);
+      if (!child_db->Put(wo, key, val).ok()) {
+        ::_exit(2);
+      }
+    }
+    // Hard crash without closing DB
+    ::_exit(0);
+  }
+
+  int status = 0;
+  ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+  ASSERT_TRUE(WIFEXITED(status));
+  ASSERT_EQ(WEXITSTATUS(status), 0);
+
+  // Parent reopens DB
+  opts.create_if_missing = false;
+  ASSERT_TRUE(Reopen(opts).ok());
+
+  // Every written key must be there after reopening
+  for (int i = 0; i < 300; ++i) {
+    char key[32];
+    char expected_val[64];
+    std::snprintf(key, sizeof(key), "crash_k_%04d", i);
+    std::snprintf(expected_val, sizeof(expected_val), "crash_v_%04d", i);
+    EXPECT_EQ(Get(key), expected_val);
+  }
 }
 
 }  // namespace

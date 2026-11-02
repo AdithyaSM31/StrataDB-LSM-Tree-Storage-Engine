@@ -1,13 +1,17 @@
 #ifndef STRATA_DB_DB_IMPL_H_
 #define STRATA_DB_DB_IMPL_H_
 
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "db/dbformat.h"
+#include "db/table_cache.h"
 #include "db/version_set.h"
 #include "log/log_writer.h"
 #include "memtable/memtable.h"
@@ -93,7 +97,12 @@ class DBImpl : public DB {
 
  private:
   Status NewDB();
-  Status RecoverLogFile(uint64_t number, SequenceNumber* max_sequence);
+  Status RecoverLogFile(uint64_t number, SequenceNumber* max_sequence, bool* corrupted);
+  Status MakeRoomForWrite(std::unique_lock<std::mutex>* lock);
+  Status SwitchMemTable();
+  void BackgroundThreadMain();
+  void CompactMemTable();
+  void RemoveObsoleteFiles();
 
   Env* const env_;
   const Options options_;
@@ -104,12 +113,18 @@ class DBImpl : public DB {
   std::unique_ptr<FileLock> db_lock_;
   std::unique_ptr<VersionSet> versions_;  // guarded by mutex_
   MemTable* mem_ = nullptr;               // Ref'd; guarded by mutex_
+  MemTable* imm_ = nullptr;               // being flushed; Ref'd; guarded by mutex_
   std::unique_ptr<WritableFile> logfile_;
   std::unique_ptr<log::Writer> log_;
   uint64_t logfile_number_ = 0;
-  SequenceNumber last_sequence_ = 0;  // guarded by mutex_
-  Status bg_error_;                   // sticky; guarded by mutex_
-  SnapshotList snapshots_;            // guarded by mutex_
+  Status bg_error_;  // sticky; guarded by mutex_
+  std::unique_ptr<TableCache> table_cache_;
+  SnapshotList snapshots_;  // guarded by mutex_
+
+  std::thread background_thread_;
+  std::condition_variable background_work_cv_;  // "there is work" / "work finished"
+  bool shutting_down_ = false;                  // guarded by mutex_
+  std::set<uint64_t> pending_outputs_;          // table files being written: never delete these
 };
 
 }  // namespace strata
