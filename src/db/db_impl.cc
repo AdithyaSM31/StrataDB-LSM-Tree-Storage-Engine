@@ -41,9 +41,25 @@ Status DB::Open(const Options& options, const std::string& name, std::unique_ptr
   return s;
 }
 
+namespace {
+
+// Smallest write buffer we accept. A new memtable allocates its skiplist head
+// from a 4 KB arena block, so an empty one already reports just over 4 KB; with
+// a buffer that small every write became its own flush and its own L0 file.
+// LevelDB uses the same 64 KB minimum.
+constexpr size_t kMinWriteBufferSize = size_t{64} * 1024;
+
+Options SanitizeOptions(const Options& src) {
+  Options result = src;
+  result.write_buffer_size = std::max(result.write_buffer_size, kMinWriteBufferSize);
+  return result;
+}
+
+}  // namespace
+
 DBImpl::DBImpl(const Options& options, const std::string& dbname)
     : env_(options.env == nullptr ? Env::Default() : options.env),
-      options_(options),
+      options_(SanitizeOptions(options)),
       dbname_(dbname),
       icmp_(),
       imm_(nullptr),
@@ -343,6 +359,11 @@ Status DBImpl::RecoverLogFile(uint64_t number, SequenceNumber* max_sequence, boo
     if (options_.paranoid_checks) {
       return reporter.status();
     }
+    // Keep the prefix: replay stops here, and Recover() discards every later
+    // record and log. Remember it so it is visible (GetProperty("strata.recovery")).
+    recovery_status_ =
+        Status::Corruption(log_fname + ": " + reporter.status().ToString(),
+                           "replay stopped here; later records and logs were discarded");
     *corrupted = true;
     return Status::OK();
   }
@@ -560,11 +581,10 @@ Status DBImpl::Get(const ReadOptions& opts, std::string_view key, std::string* v
 
   LookupKey lkey(key, snapshot);
   Status s;
-  if (mem->Get(lkey, value, &s)) {
-    // done
-  } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
-    // done
-  } else {
+  // Newest data first: the active memtable, the one being flushed, then files.
+  // A memtable "has the answer" for a value or a tombstone alike.
+  const bool in_memory = mem->Get(lkey, value, &s) || (imm != nullptr && imm->Get(lkey, value, &s));
+  if (!in_memory) {
     s = current->Get(lkey, value, table_cache_.get());
   }
 
@@ -624,6 +644,17 @@ Status DBImpl::CompactRange(std::string_view /*begin*/, std::string_view /*end*/
   return Status::NotSupported("CompactRange is not supported in Week 1");
 }
 
-bool DBImpl::GetProperty(std::string_view /*name*/, std::string* /*value*/) { return false; }
+bool DBImpl::GetProperty(std::string_view name, std::string* value) {
+  if (value == nullptr) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (name == "strata.recovery") {
+    // "OK", or why the last Open stopped replaying the WAL early.
+    *value = recovery_status_.ok() ? "OK" : recovery_status_.ToString();
+    return true;
+  }
+  return false;  // "strata.stats" arrives in Week 4
+}
 
 }  // namespace strata

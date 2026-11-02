@@ -74,85 +74,74 @@ void Version::Unref() {
   }
 }
 
-Status Version::Get(const LookupKey& key, std::string* value, TableCache* cache) const {
-  std::string_view user_key = key.user_key();
+namespace {
 
-  // Search L0 files, newest first (files_[0] is already sorted newest first by number)
+// Looks up `key` in one table file. Returns true if this file decides the
+// answer, with *s set to: OK (and *value) for a value, NotFound for a
+// tombstone, or the error. Returns false if the key is not in this file.
+bool SearchFile(const FileMetaData* f, const LookupKey& key, std::string* value, TableCache* cache,
+                Status* s) {
+  const std::string_view user_key = key.user_key();
+  if (user_key.compare(ExtractUserKey(f->smallest)) < 0 ||
+      user_key.compare(ExtractUserKey(f->largest)) > 0) {
+    return false;  // outside the file's key range: no read needed
+  }
+  std::shared_ptr<Table> table;
+  *s = cache->FindTable(f->number, f->file_size, &table);
+  if (!s->ok()) {
+    return true;
+  }
+  bool found = false;
+  std::string found_key;
+  std::string found_value;
+  *s = table->InternalGet(key.internal_key(), &found, &found_key, &found_value);
+  if (!s->ok()) {
+    return true;
+  }
+  if (!found || ExtractUserKey(found_key) != user_key) {
+    return false;  // the first entry >= the lookup key belongs to another user key
+  }
+  ParsedInternalKey parsed;
+  if (!ParseInternalKey(found_key, &parsed)) {
+    *s = Status::Corruption("corrupted internal key in table");
+    return true;
+  }
+  if (parsed.type == kTypeDeletion) {
+    // A tombstone decides the answer: older files must not be consulted, or a
+    // deleted value would come back.
+    *s = Status::NotFound("key deleted");
+    return true;
+  }
+  *value = std::move(found_value);
+  *s = Status::OK();
+  return true;
+}
+
+}  // namespace
+
+Status Version::Get(const LookupKey& key, std::string* value, TableCache* cache) const {
+  Status s;
+  // L0 files may overlap, so check every one whose range covers the key,
+  // newest first (files_[0] is sorted newest first).
   for (const FileMetaData* f : files_[0]) {
-    std::string_view smallest_user = ExtractUserKey(f->smallest);
-    std::string_view largest_user = ExtractUserKey(f->largest);
-    if (user_key.compare(smallest_user) < 0 || user_key.compare(largest_user) > 0) {
-      continue;
-    }
-    std::shared_ptr<Table> table;
-    Status s = cache->FindTable(f->number, f->file_size, &table);
-    if (!s.ok()) {
+    if (SearchFile(f, key, value, cache, &s)) {
       return s;
-    }
-    bool found = false;
-    std::string k;
-    std::string v;
-    s = table->InternalGet(key.internal_key(), &found, &k, &v);
-    if (!s.ok()) {
-      return s;
-    }
-    if (found && ExtractUserKey(k) == user_key) {
-      ParsedInternalKey parsed;
-      if (!ParseInternalKey(k, &parsed)) {
-        return Status::Corruption("corrupted internal key in table");
-      }
-      if (parsed.type == kTypeValue) {
-        *value = std::move(v);
-        return Status::OK();
-      } else if (parsed.type == kTypeDeletion) {
-        return Status::NotFound("key deleted");
-      }
     }
   }
 
-  // Search L1 and below
+  // L1 and below never overlap: at most one file per level can hold the key,
+  // the first whose largest key is >= the lookup key.
+  const InternalKeyComparator icmp;
   for (int level = 1; level < kNumLevels; ++level) {
-    if (files_[level].empty()) {
-      continue;
-    }
-    auto it = std::lower_bound(files_[level].begin(), files_[level].end(), key.internal_key(),
-                               [](const FileMetaData* f, std::string_view ikey) {
-                                 InternalKeyComparator icmp;
+    const std::vector<FileMetaData*>& files = files_[level];
+    auto it = std::lower_bound(files.begin(), files.end(), key.internal_key(),
+                               [&icmp](const FileMetaData* f, std::string_view ikey) {
                                  return icmp.Compare(f->largest, ikey) < 0;
                                });
-    if (it != files_[level].end()) {
-      const FileMetaData* f = *it;
-      std::string_view smallest_user = ExtractUserKey(f->smallest);
-      std::string_view largest_user = ExtractUserKey(f->largest);
-      if (user_key.compare(smallest_user) >= 0 && user_key.compare(largest_user) <= 0) {
-        std::shared_ptr<Table> table;
-        Status s = cache->FindTable(f->number, f->file_size, &table);
-        if (!s.ok()) {
-          return s;
-        }
-        bool found = false;
-        std::string k;
-        std::string v;
-        s = table->InternalGet(key.internal_key(), &found, &k, &v);
-        if (!s.ok()) {
-          return s;
-        }
-        if (found && ExtractUserKey(k) == user_key) {
-          ParsedInternalKey parsed;
-          if (!ParseInternalKey(k, &parsed)) {
-            return Status::Corruption("corrupted internal key in table");
-          }
-          if (parsed.type == kTypeValue) {
-            *value = std::move(v);
-            return Status::OK();
-          } else if (parsed.type == kTypeDeletion) {
-            return Status::NotFound("key deleted");
-          }
-        }
-      }
+    if (it != files.end() && SearchFile(*it, key, value, cache, &s)) {
+      return s;
     }
   }
-
   return Status::NotFound("key not found");
 }
 

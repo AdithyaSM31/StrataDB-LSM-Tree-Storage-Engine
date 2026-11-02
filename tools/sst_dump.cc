@@ -137,9 +137,6 @@ Status VerifyTable(Env* env, const std::string& filename, uint64_t file_size, co
         return Status::Corruption("malformed internal key at offset " +
                                   std::to_string(data_handle.offset()));
       }
-      if (parsed.sequence > kMaxSequenceNumber) {
-        return Status::Corruption("sequence number exceeds 56 bits");
-      }
       if (parsed.type != kTypeValue && parsed.type != kTypeDeletion) {
         return Status::Corruption("unknown value type in internal key");
       }
@@ -184,7 +181,7 @@ bool ProcessFile(Env* env, const std::string& filename, bool verify, bool show_e
   Footer footer;
   s = ReadFooter(file.get(), file_size, &footer);
   if (!s.ok()) {
-    std::cerr << filename << ": Corruption: " << s.ToString() << "\n";
+    std::cerr << filename << ": " << s.ToString() << "\n";
     return false;
   }
 
@@ -198,7 +195,7 @@ bool ProcessFile(Env* env, const std::string& filename, bool verify, bool show_e
   std::unique_ptr<Table> table;
   s = Table::Open(options, &icmp, std::move(file), file_size, &table);
   if (!s.ok()) {
-    std::cerr << filename << ": Corruption: " << s.ToString() << "\n";
+    std::cerr << filename << ": " << s.ToString() << "\n";
     return false;
   }
 
@@ -236,7 +233,7 @@ bool ProcessFile(Env* env, const std::string& filename, bool verify, bool show_e
     size_t blocks = 0;
     s = VerifyTable(env, filename, file_size, footer, &entries, &blocks);
     if (!s.ok()) {
-      std::cerr << filename << ": Corruption: " << s.ToString() << "\n";
+      std::cerr << filename << ": " << s.ToString() << "\n";
       ok = false;
     } else {
       std::cout << "OK: verified " << entries << " entries across " << blocks << " data blocks\n";

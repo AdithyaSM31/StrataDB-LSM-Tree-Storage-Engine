@@ -24,24 +24,13 @@
 namespace strata {
 namespace {
 
-std::string FindSstDumpBinary() {
-  std::vector<std::filesystem::path> candidates;
-  try {
-    auto self = std::filesystem::canonical("/proc/self/exe");
-    candidates.push_back(self.parent_path() / "sst_dump");
-    candidates.push_back(self.parent_path().parent_path() / "sst_dump");
-  } catch (...) {
-  }
-  candidates.push_back("./sst_dump");
-  candidates.push_back("../sst_dump");
-  candidates.push_back("build/debug/sst_dump");
-  for (const auto& p : candidates) {
-    if (std::filesystem::exists(p)) {
-      return std::filesystem::canonical(p).string();
-    }
-  }
-  return "sst_dump";
-}
+// tests/CMakeLists.txt passes the exact path of the sst_dump it built (and
+// builds it before this test). Empty when tools are disabled.
+#ifndef STRATA_SST_DUMP_PATH
+#define STRATA_SST_DUMP_PATH ""
+#endif
+
+std::string FindSstDumpBinary() { return STRATA_SST_DUMP_PATH; }
 
 struct CommandResult {
   int exit_code = -1;
@@ -86,11 +75,19 @@ CommandResult RunSstDump(const std::vector<std::string>& args) {
 class SstDumpTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    if (FindSstDumpBinary().empty()) {
+      GTEST_SKIP() << "sst_dump was not built (STRATA_BUILD_TOOLS=OFF)";
+    }
     test_dir_ = "/tmp/strata_sst_dump_test_" + std::to_string(::getpid());
     std::filesystem::create_directories(test_dir_);
   }
 
-  void TearDown() override { std::filesystem::remove_all(test_dir_); }
+  void TearDown() override {
+    if (!test_dir_.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(test_dir_, ec);
+    }
+  }
 
   std::string MakeTableFile(const std::string& name, int bloom_bits,
                             const std::vector<std::pair<std::string, std::string>>& entries) {

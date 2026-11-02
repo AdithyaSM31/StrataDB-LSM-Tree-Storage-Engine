@@ -118,6 +118,8 @@ class DBImpl : public DB {
   std::unique_ptr<log::Writer> log_;
   uint64_t logfile_number_ = 0;
   Status bg_error_;  // sticky; guarded by mutex_
+  // Set if Open stopped replaying the WAL at a corruption (paranoid_checks off).
+  Status recovery_status_;  // guarded by mutex_
   std::unique_ptr<TableCache> table_cache_;
   SnapshotList snapshots_;  // guarded by mutex_
 

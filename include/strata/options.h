@@ -51,6 +51,9 @@ struct Options {
 
   // Amount of data to build up in memory (backed by an unsorted log
   // on disk) before converting to a sorted on-disk file.
+  // Values below 64 KB are raised to 64 KB when the database opens: an empty
+  // memtable already reserves one 4 KB arena block, so a smaller buffer would
+  // flush after every write.
   // Default: 4 MB
   size_t write_buffer_size = size_t{4} * 1024 * 1024;
 

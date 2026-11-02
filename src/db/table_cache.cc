@@ -18,13 +18,17 @@ Status TableCache::FindTable(uint64_t number, uint64_t file_size, std::shared_pt
   if (table == nullptr) {
     return Status::InvalidArgument("table is null");
   }
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = cache_.find(number);
-  if (it != cache_.end()) {
-    *table = it->second;
-    return Status::OK();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_.find(number);
+    if (it != cache_.end()) {
+      *table = it->second;
+      return Status::OK();
+    }
   }
 
+  // Open outside the lock: it reads the footer, index block and filter from
+  // disk, and lookups in tables that are already open should not wait for it.
   const std::string fname = TableFileName(dbname_, number);
   if (file_size == 0) {
     Status s = env_->GetFileSize(fname, &file_size);
@@ -32,22 +36,23 @@ Status TableCache::FindTable(uint64_t number, uint64_t file_size, std::shared_pt
       return s;
     }
   }
-
   std::unique_ptr<RandomAccessFile> file;
   Status s = env_->NewRandomAccessFile(fname, &file);
   if (!s.ok()) {
     return s;
   }
-
-  std::unique_ptr<Table> t;
-  s = Table::Open(options_, icmp_, std::move(file), file_size, &t);
+  std::unique_ptr<Table> opened;
+  s = Table::Open(options_, icmp_, std::move(file), file_size, &opened);
   if (!s.ok()) {
     return s;
   }
 
-  std::shared_ptr<Table> st = std::move(t);
-  cache_[number] = st;
-  *table = std::move(st);
+  std::lock_guard<std::mutex> lock(mutex_);
+  // Another thread may have opened the same table meanwhile; keep the first so
+  // every reader shares one Table.
+  auto [it, inserted] = cache_.emplace(number, std::shared_ptr<Table>(std::move(opened)));
+  (void)inserted;
+  *table = it->second;
   return Status::OK();
 }
 

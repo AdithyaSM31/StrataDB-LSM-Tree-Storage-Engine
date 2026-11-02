@@ -38,3 +38,10 @@ foreach(test_src IN LISTS STRATA_TEST_SOURCES)
     DISCOVERY_MODE PRE_TEST
     PROPERTIES LABELS ${test_label})
 endforeach()
+
+# sst_dump_test runs the real tool: give it the tool's exact path, and build the
+# tool first so the test never runs a stale or missing binary.
+if(TARGET sst_dump_test AND TARGET sst_dump)
+  target_compile_definitions(sst_dump_test PRIVATE STRATA_SST_DUMP_PATH="$<TARGET_FILE:sst_dump>")
+  add_dependencies(sst_dump_test sst_dump)
+endif()

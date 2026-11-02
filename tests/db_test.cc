@@ -841,7 +841,7 @@ TEST_F(DBTest, OpenCreatesCurrentAndManifest) {
 TEST_F(DBTest, MilestoneFlushAcrossReopen) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 4096;  // 4 KB buffer forces frequent flushes
+  opts.write_buffer_size = size_t{64} * 1024;  // the minimum: ~200 KB of data flushes a few times
   ASSERT_TRUE(Open(opts).ok());
 
   // Write 2,000 keys of 100 bytes each
@@ -1011,8 +1011,20 @@ TEST_F(DBTest, Week1TrapFixedCorruptionPolicy) {
   non_paranoid_opts.paranoid_checks = false;
   ASSERT_TRUE(Reopen(non_paranoid_opts).ok());
 
-  // Prefix (k1) is kept
+  // Prefix (k1) is kept, and nothing from the damaged record on survives: a
+  // prefix of the writes, never a state with a hole in it.
   EXPECT_EQ(Get("k1"), "v1");
+  Status gs;
+  Get("k2", &gs);
+  EXPECT_TRUE(gs.IsNotFound()) << gs.ToString();
+  Get("k3", &gs);
+  EXPECT_TRUE(gs.IsNotFound()) << gs.ToString();
+
+  // The early stop is visible, not silent.
+  std::string recovery;
+  ASSERT_TRUE(db_->GetProperty("strata.recovery", &recovery));
+  EXPECT_NE(recovery.find("Corruption"), std::string::npos) << recovery;
+  EXPECT_NE(recovery.find("replay stopped"), std::string::npos) << recovery;
 
   // Write new data
   ASSERT_TRUE(Put("k_new", "v_new").ok());
@@ -1022,6 +1034,9 @@ TEST_F(DBTest, Week1TrapFixedCorruptionPolicy) {
   ASSERT_TRUE(Reopen(non_paranoid_opts).ok());
   EXPECT_EQ(Get("k1"), "v1");
   EXPECT_EQ(Get("k_new"), "v_new");
+  // The damaged log was retired, so this Open replayed cleanly.
+  ASSERT_TRUE(db_->GetProperty("strata.recovery", &recovery));
+  EXPECT_EQ(recovery, "OK");
 }
 
 class FailingSstEnv : public EnvWrapper {
@@ -1060,7 +1075,6 @@ TEST_F(DBTest, StickyBackgroundError) {
   Options opts;
   opts.create_if_missing = true;
   opts.env = flaky_env.get();
-  opts.write_buffer_size = 4096;
 
   ASSERT_TRUE(Open(opts).ok());
 
@@ -1092,25 +1106,29 @@ TEST_F(DBTest, StickyBackgroundError) {
 TEST_F(DBTest, ConcurrencyWritesReadsFlushes) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 2048;  // frequent flushes
+  opts.write_buffer_size = size_t{64} * 1024;  // ~500 KB of data: several flushes
   ASSERT_TRUE(Open(opts).ok());
 
   std::atomic<bool> stop{false};
   constexpr int kNumKeys = 500;
+  // ~1 KB values, so each memtable holds many entries and flushes keep happening.
+  auto value_for = [](int i) {
+    char prefix[32];
+    std::snprintf(prefix, sizeof(prefix), "val_%04d_", i);
+    return std::string(prefix) + std::string(1000, 'p');
+  };
 
   // Writer thread
-  std::thread writer([this, &stop]() {
+  std::thread writer([this, &stop, &value_for]() {
     for (int i = 0; i < kNumKeys && !stop.load(); ++i) {
       char key[32];
-      char val[64];
       std::snprintf(key, sizeof(key), "concur_%04d", i);
-      std::snprintf(val, sizeof(val), "val_%04d", i);
-      (void)Put(key, val);
+      (void)Put(key, value_for(i));
     }
   });
 
   // Reader thread
-  std::thread reader([this, &stop]() {
+  std::thread reader([this, &stop, &value_for]() {
     while (!stop.load()) {
       for (int i = 0; i < 50; ++i) {
         char key[32];
@@ -1118,9 +1136,7 @@ TEST_F(DBTest, ConcurrencyWritesReadsFlushes) {
         Status s;
         std::string v = Get(key, &s);
         if (s.ok()) {
-          char expected_prefix[32];
-          std::snprintf(expected_prefix, sizeof(expected_prefix), "val_%04d", i);
-          EXPECT_EQ(v, expected_prefix);
+          EXPECT_EQ(v, value_for(i));
         }
       }
     }
@@ -1129,21 +1145,22 @@ TEST_F(DBTest, ConcurrencyWritesReadsFlushes) {
   writer.join();
   stop.store(true);
   reader.join();
+  EXPECT_GE(CountFiles(FileType::kTableFile), 2) << "the test must flush while reading";
 
   // All written keys read back
   for (int i = 0; i < kNumKeys; ++i) {
     char key[32];
-    char expected_val[64];
     std::snprintf(key, sizeof(key), "concur_%04d", i);
-    std::snprintf(expected_val, sizeof(expected_val), "val_%04d", i);
-    EXPECT_EQ(Get(key), expected_val);
+    EXPECT_EQ(Get(key), value_for(i));
   }
 }
 
 TEST_F(DBTest, ProcessCrashDuringFlushes) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 4096;
+  opts.write_buffer_size = size_t{64} * 1024;
+  // ~1 KB values: 300 of them (~300 KB) flush several times before the crash.
+  const std::string padding(1000, 'p');
 
   // Open and close once to establish the DB
   ASSERT_TRUE(Open(opts).ok());
@@ -1165,7 +1182,7 @@ TEST_F(DBTest, ProcessCrashDuringFlushes) {
       char val[64];
       std::snprintf(key, sizeof(key), "crash_k_%04d", i);
       std::snprintf(val, sizeof(val), "crash_v_%04d", i);
-      if (!child_db->Put(wo, key, val).ok()) {
+      if (!child_db->Put(wo, key, std::string(val) + padding).ok()) {
         ::_exit(2);
       }
     }
@@ -1178,6 +1195,9 @@ TEST_F(DBTest, ProcessCrashDuringFlushes) {
   ASSERT_TRUE(WIFEXITED(status));
   ASSERT_EQ(WEXITSTATUS(status), 0);
 
+  // The child flushed while running (the reopen below flushes the rest).
+  EXPECT_GE(CountFiles(FileType::kTableFile), 2);
+
   // Parent reopens DB
   opts.create_if_missing = false;
   ASSERT_TRUE(Reopen(opts).ok());
@@ -1188,7 +1208,7 @@ TEST_F(DBTest, ProcessCrashDuringFlushes) {
     char expected_val[64];
     std::snprintf(key, sizeof(key), "crash_k_%04d", i);
     std::snprintf(expected_val, sizeof(expected_val), "crash_v_%04d", i);
-    EXPECT_EQ(Get(key), expected_val);
+    EXPECT_EQ(Get(key), std::string(expected_val) + padding);
   }
 }
 
@@ -1236,7 +1256,6 @@ TEST_F(DBTest, DeleteNonExistentKeyThenFlush) {
 TEST_F(DBTest, ConcurrentFlushes) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 4096;
   ASSERT_TRUE(Open(opts).ok());
 
   for (int i = 0; i < 100; ++i) {
@@ -1255,6 +1274,22 @@ TEST_F(DBTest, ConcurrentFlushes) {
   for (int i = 0; i < 100; ++i) {
     EXPECT_EQ(Get("k" + std::to_string(i)), "v" + std::to_string(i));
   }
+}
+
+TEST_F(DBTest, TinyWriteBufferIsRaisedToTheMinimum) {
+  // With a 1 KB buffer every write used to become its own flush and L0 file,
+  // because an empty memtable already reports a 4 KB arena block. The buffer
+  // is now raised to 64 KB, so ~30 KB of writes stay in the memtable.
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 1024;
+  ASSERT_TRUE(Open(opts).ok());
+  for (int i = 0; i < 300; ++i) {
+    ASSERT_TRUE(Put("key" + std::to_string(i), std::string(100, 'v')).ok());
+  }
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 0);
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 1);
 }
 
 }  // namespace
