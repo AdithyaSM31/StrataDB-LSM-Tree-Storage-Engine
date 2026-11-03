@@ -648,6 +648,13 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
 }
 
 Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
+  if (batch == nullptr) {
+    return Status::InvalidArgument("WriteBatch pointer is null");
+  }
+  return WriteImpl(opts, batch);
+}
+
+Status DBImpl::WriteImpl(const WriteOptions& opts, WriteBatch* batch) {
   if (batch != nullptr) {
     Status s = batch->Iterate(nullptr);
     if (!s.ok()) {
@@ -842,7 +849,7 @@ std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& opts) {
 }
 
 Status DBImpl::Flush() {
-  Status s = Write(WriteOptions(), nullptr);
+  Status s = WriteImpl(WriteOptions(), nullptr);  // switch the memtable as queue leader
   if (!s.ok()) {
     return s;
   }

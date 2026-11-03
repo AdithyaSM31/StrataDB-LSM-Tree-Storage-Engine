@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -158,6 +159,19 @@ class DBTest : public ::testing::Test {
   }
 
   DBImpl* dbfull() { return static_cast<DBImpl*>(db_.get()); }
+
+  // Waits until n writers (the leader included) are in the write queue. Gives
+  // up after 10 s, so a bug fails the test instead of hanging it.
+  bool WaitForQueuedWriters(int n) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (dbfull()->TEST_WritersCount() < n) {
+      if (std::chrono::steady_clock::now() > deadline) {
+        return false;
+      }
+      std::this_thread::yield();
+    }
+    return true;
+  }
 
   std::vector<std::string> GetTableFiles() {
     std::vector<std::string> children;
@@ -2029,11 +2043,9 @@ class GroupCommitTestEnv : public EnvWrapper {
     release_sync_.store(false);
   }
 
-  void WaitForSyncToHold() {
-    while (!in_sync_.load()) {
-      std::this_thread::yield();
-    }
-  }
+  // Both waits give up after 10 s and return false, so a write path that
+  // never syncs (or never appends) fails the test instead of hanging it.
+  bool WaitForSyncToHold() { return WaitFor(in_sync_); }
 
   void ReleaseSync() {
     hold_sync_.store(false);
@@ -2046,11 +2058,7 @@ class GroupCommitTestEnv : public EnvWrapper {
     release_append_.store(false);
   }
 
-  void WaitForAppendToHold() {
-    while (!in_append_.load()) {
-      std::this_thread::yield();
-    }
-  }
+  bool WaitForAppendToHold() { return WaitFor(in_append_); }
 
   void ReleaseAppend() {
     hold_append_.store(false);
@@ -2065,6 +2073,17 @@ class GroupCommitTestEnv : public EnvWrapper {
   void reset_wal_sync_count() { wal_sync_count_.store(0); }
 
  private:
+  static bool WaitFor(const std::atomic<bool>& flag) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!flag.load()) {
+      if (std::chrono::steady_clock::now() > deadline) {
+        return false;
+      }
+      std::this_thread::yield();
+    }
+    return true;
+  }
+
   class GroupCommitTestWritableFile : public WritableFileWrapper {
    public:
     GroupCommitTestWritableFile(std::unique_ptr<WritableFile> target, GroupCommitTestEnv* env)
@@ -2132,7 +2151,7 @@ TEST_F(DBTest, GroupCommitHappens) {
     statuses[0] = Put("k0", "v0", wo);
   });
 
-  env_ptr->WaitForSyncToHold();
+  EXPECT_TRUE(env_ptr->WaitForSyncToHold());
 
   // Queue 9 more sync writers behind Writer 0
   for (int i = 1; i < 10; ++i) {
@@ -2144,9 +2163,7 @@ TEST_F(DBTest, GroupCommitHappens) {
   }
 
   // Wait until all 10 writers are in the queue
-  while (dbfull()->TEST_WritersCount() < 10) {
-    std::this_thread::yield();
-  }
+  EXPECT_TRUE(WaitForQueuedWriters(10));
 
   // Release the held sync. Writer 0 finishes sync #1.
   // Writer 1 becomes leader, batches writers 1..9, and executes sync #2.
@@ -2184,7 +2201,7 @@ TEST_F(DBTest, NoUnsyncedSyncWrites) {
     EXPECT_TRUE(Put("k_async", "v_async", wo).ok());
   });
 
-  env_ptr->WaitForAppendToHold();
+  EXPECT_TRUE(env_ptr->WaitForAppendToHold());
 
   std::thread sync_writer([this] {
     WriteOptions wo;
@@ -2192,9 +2209,7 @@ TEST_F(DBTest, NoUnsyncedSyncWrites) {
     EXPECT_TRUE(Put("k_sync", "v_sync", wo).ok());
   });
 
-  while (dbfull()->TEST_WritersCount() < 2) {
-    std::this_thread::yield();
-  }
+  EXPECT_TRUE(WaitForQueuedWriters(2));
 
   // Release non-sync writer. It must NOT batch the sync writer because
   // non-sync leader cannot acknowledge a sync follower without fsync.
@@ -2233,7 +2248,7 @@ TEST_F(DBTest, SyncFailureStickyAcrossGroup) {
     statuses[0] = Put("k0", "v0", wo);
   });
 
-  env_ptr->WaitForSyncToHold();
+  EXPECT_TRUE(env_ptr->WaitForSyncToHold());
 
   // Writers 1, 2, 3 queue up while Writer 0 is holding
   for (int i = 1; i < 4; ++i) {
@@ -2244,9 +2259,7 @@ TEST_F(DBTest, SyncFailureStickyAcrossGroup) {
     });
   }
 
-  while (dbfull()->TEST_WritersCount() < 4) {
-    std::this_thread::yield();
-  }
+  EXPECT_TRUE(WaitForQueuedWriters(4));
 
   // Make sync #2 (the group sync for writers 1, 2, 3) fail
   env_ptr->SetFailOnSyncNumber(2);
@@ -2311,7 +2324,7 @@ TEST_F(DBTest, ConcurrentWritesNoSequenceGaps) {
 TEST_F(DBTest, FlushDuringConcurrentWrites) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 32 * 1024;
+  opts.write_buffer_size = size_t{64} * 1024;  // the minimum: flushes happen often
   ASSERT_TRUE(Open(opts).ok());
 
   std::atomic<bool> stop{false};
@@ -2353,7 +2366,10 @@ TEST_F(DBTest, FlushDuringConcurrentWrites) {
   }
 }
 
-TEST_F(DBTest, SyncThroughputTiming) {
+TEST_F(DBTest, ConcurrentSyncWritesShareFsyncs) {
+  // Throughput belongs in the benchmark; this only checks that concurrent
+  // sync writers really share fsyncs. (On the review machine 2,000 sync writes
+  // from 8 threads took about 455 fsyncs.)
   auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
   GroupCommitTestEnv* env_ptr = test_env.get();
   custom_env_ = std::move(test_env);
@@ -2362,45 +2378,86 @@ TEST_F(DBTest, SyncThroughputTiming) {
   opts.create_if_missing = true;
   opts.env = env_ptr;
   ASSERT_TRUE(Open(opts).ok());
-
   env_ptr->reset_wal_sync_count();
 
   constexpr int kThreads = 8;
   constexpr int kPutsPerThread = 250;
   std::vector<std::thread> threads;
   threads.reserve(kThreads);
-
-  auto start = std::chrono::steady_clock::now();
-
   for (int t = 0; t < kThreads; ++t) {
     threads.emplace_back([this, t] {
       WriteOptions wo;
       wo.sync = true;
       for (int i = 0; i < kPutsPerThread; ++i) {
-        std::string key = "th_" + std::to_string(t) + "_k_" + std::to_string(i);
-        std::string val = "val_" + std::to_string(i);
-        Status s = Put(key, val, wo);
-        ASSERT_TRUE(s.ok());
+        EXPECT_TRUE(Put("th_" + std::to_string(t) + "_k_" + std::to_string(i), "v", wo).ok());
       }
     });
   }
-
   for (auto& t : threads) {
     t.join();
   }
 
-  auto end = std::chrono::steady_clock::now();
-  auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-  int total_syncs = env_ptr->wal_sync_count();
-  double writes_per_sec =
-      (kThreads * kPutsPerThread * 1000.0) / (duration_ms > 0 ? duration_ms : 1);
+  const int writes = kThreads * kPutsPerThread;
+  EXPECT_GT(env_ptr->wal_sync_count(), 0);
+  EXPECT_LT(env_ptr->wal_sync_count(), writes);
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), static_cast<SequenceNumber>(writes));
+}
 
-  std::cout << "\n=== GROUP COMMIT TIMING ===" << std::endl;
-  std::cout << "Duration: " << duration_ms << " ms" << std::endl;
-  std::cout << "Total syncs: " << total_syncs << " for " << (kThreads * kPutsPerThread) << " writes"
-            << std::endl;
-  std::cout << "Writes/sec: " << writes_per_sec << std::endl;
-  std::cout << "===========================\n" << std::endl;
+TEST_F(DBTest, WriteRejectsANullBatch) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+  ASSERT_TRUE(Put("k", "v").ok());
+
+  // nullptr is only the internal "switch the memtable" signal used by Flush.
+  Status s = db_->Write(WriteOptions(), nullptr);
+  EXPECT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 0);  // and it did not flush
+  EXPECT_EQ(Get("k"), "v");
+}
+
+TEST_F(DBTest, ReadersNeverSeeAPartialBatch) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Every batch sets all keys to the same round number, so any snapshot must
+  // see the same value for the first and the last key.
+  constexpr int kKeys = 100;
+  auto key = [](int k) { return "pb_" + std::to_string(1000 + k); };
+  std::atomic<bool> stop{false};
+  std::thread writer([&] {
+    for (int round = 0; !stop.load(); ++round) {
+      WriteBatch batch;
+      for (int k = 0; k < kKeys; ++k) {
+        batch.Put(key(k), std::to_string(round));
+      }
+      EXPECT_TRUE(db_->Write(WriteOptions(), &batch).ok());
+    }
+  });
+
+  int mismatches = 0;
+  int checks = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (std::chrono::steady_clock::now() < deadline || checks < 1000) {
+    const Snapshot* snap = db_->GetSnapshot();
+    ReadOptions ro;
+    ro.snapshot = snap;
+    // The last key first: a batch is inserted in order, so a half-inserted one
+    // would show the old value here and the new value in the first key.
+    Status s_last;
+    Status s_first;
+    const std::string last = Get(key(kKeys - 1), &s_last, ro);
+    const std::string first = Get(key(0), &s_first, ro);
+    if (s_last.ok() != s_first.ok() || last != first) {
+      ++mismatches;
+    }
+    ++checks;
+    db_->ReleaseSnapshot(snap);
+  }
+  stop.store(true);
+  writer.join();
+  EXPECT_EQ(mismatches, 0) << "out of " << checks << " snapshots";
 }
 
 TEST_F(DBTest, NonSyncLeaderDoesNotBatchSyncFollower) {
@@ -2425,7 +2482,7 @@ TEST_F(DBTest, NonSyncLeaderDoesNotBatchSyncFollower) {
     wo.sync = true;
     statuses[0] = Put("k0", "v0", wo);
   });
-  env_ptr->WaitForSyncToHold();
+  EXPECT_TRUE(env_ptr->WaitForSyncToHold());
 
   // Writer 1 (sync=false)
   writers.emplace_back([this, &statuses] {
@@ -2433,6 +2490,7 @@ TEST_F(DBTest, NonSyncLeaderDoesNotBatchSyncFollower) {
     wo.sync = false;
     statuses[1] = Put("k1", "v1", wo);
   });
+  EXPECT_TRUE(WaitForQueuedWriters(2));  // queue order = creation order
 
   // Writer 2 (sync=false)
   writers.emplace_back([this, &statuses] {
@@ -2440,6 +2498,7 @@ TEST_F(DBTest, NonSyncLeaderDoesNotBatchSyncFollower) {
     wo.sync = false;
     statuses[2] = Put("k2", "v2", wo);
   });
+  EXPECT_TRUE(WaitForQueuedWriters(3));  // queue order = creation order
 
   // Writer 3 (sync=true)
   writers.emplace_back([this, &statuses] {
@@ -2447,6 +2506,7 @@ TEST_F(DBTest, NonSyncLeaderDoesNotBatchSyncFollower) {
     wo.sync = true;
     statuses[3] = Put("k3", "v3", wo);
   });
+  EXPECT_TRUE(WaitForQueuedWriters(4));  // queue order = creation order
 
   // Writer 4 (sync=false)
   writers.emplace_back([this, &statuses] {
@@ -2454,10 +2514,7 @@ TEST_F(DBTest, NonSyncLeaderDoesNotBatchSyncFollower) {
     wo.sync = false;
     statuses[4] = Put("k4", "v4", wo);
   });
-
-  while (dbfull()->TEST_WritersCount() < 5) {
-    std::this_thread::yield();
-  }
+  EXPECT_TRUE(WaitForQueuedWriters(5));  // queue order = creation order
 
   // Release Writer 0.
   // Writer 0 finishes (Sync 1).
@@ -2502,7 +2559,7 @@ TEST_F(DBTest, BuildBatchGroupThrottlesOnSmallLeader) {
     wo.sync = true;
     statuses[0] = Put("hold_k", "hold_v", wo);
   });
-  env_ptr->WaitForSyncToHold();
+  EXPECT_TRUE(env_ptr->WaitForSyncToHold());
 
   // Writer 1: small leader batch (1 KB <= 128 KB) -> max group size = size + 128 KB (~129 KB)
   writers.emplace_back([this, &statuses] {
@@ -2510,24 +2567,23 @@ TEST_F(DBTest, BuildBatchGroupThrottlesOnSmallLeader) {
     wo.sync = true;
     statuses[1] = Put("sm_k1", std::string(1024, 'a'), wo);
   });
+  EXPECT_TRUE(WaitForQueuedWriters(2));  // queue order = creation order
 
   // Writer 2: follower batch of 60 KB (total so far ~61 KB <= ~129 KB -> should be included)
   writers.emplace_back([this, &statuses] {
     WriteOptions wo;
     wo.sync = true;
-    statuses[2] = Put("sm_k2", std::string(60 * 1024, 'b'), wo);
+    statuses[2] = Put("sm_k2", std::string(size_t{60} * 1024, 'b'), wo);
   });
+  EXPECT_TRUE(WaitForQueuedWriters(3));  // queue order = creation order
 
   // Writer 3: follower batch of 80 KB (total would be ~141 KB > ~129 KB -> must NOT be included)
   writers.emplace_back([this, &statuses] {
     WriteOptions wo;
     wo.sync = true;
-    statuses[3] = Put("sm_k3", std::string(80 * 1024, 'c'), wo);
+    statuses[3] = Put("sm_k3", std::string(size_t{80} * 1024, 'c'), wo);
   });
-
-  while (dbfull()->TEST_WritersCount() < 4) {
-    std::this_thread::yield();
-  }
+  EXPECT_TRUE(WaitForQueuedWriters(4));  // queue order = creation order
 
   // Release Writer 0 (Sync 1).
   // Writer 1 batches Writer 2, stops before Writer 3, and executes Sync 2.
@@ -2544,8 +2600,8 @@ TEST_F(DBTest, BuildBatchGroupThrottlesOnSmallLeader) {
   }
   EXPECT_EQ(Get("hold_k"), "hold_v");
   EXPECT_EQ(Get("sm_k1"), std::string(1024, 'a'));
-  EXPECT_EQ(Get("sm_k2"), std::string(60 * 1024, 'b'));
-  EXPECT_EQ(Get("sm_k3"), std::string(80 * 1024, 'c'));
+  EXPECT_EQ(Get("sm_k2"), std::string(size_t{60} * 1024, 'b'));
+  EXPECT_EQ(Get("sm_k3"), std::string(size_t{80} * 1024, 'c'));
 
   EXPECT_EQ(env_ptr->wal_sync_count(), 3);
 }
@@ -2572,32 +2628,31 @@ TEST_F(DBTest, BuildBatchGroupOneMegabyteCap) {
     wo.sync = true;
     statuses[0] = Put("hold_k", "hold_v", wo);
   });
-  env_ptr->WaitForSyncToHold();
+  EXPECT_TRUE(env_ptr->WaitForSyncToHold());
 
   // Writer 1: 200 KB (> 128 KB, so max_size = 1 MB)
   writers.emplace_back([this, &statuses] {
     WriteOptions wo;
     wo.sync = true;
-    statuses[1] = Put("cap_k1", std::string(200 * 1024, 'a'), wo);
+    statuses[1] = Put("cap_k1", std::string(size_t{200} * 1024, 'a'), wo);
   });
+  EXPECT_TRUE(WaitForQueuedWriters(2));  // queue order = creation order
 
   // Writer 2: 500 KB (total 700 KB <= 1 MB -> included)
   writers.emplace_back([this, &statuses] {
     WriteOptions wo;
     wo.sync = true;
-    statuses[2] = Put("cap_k2", std::string(500 * 1024, 'b'), wo);
+    statuses[2] = Put("cap_k2", std::string(size_t{500} * 1024, 'b'), wo);
   });
+  EXPECT_TRUE(WaitForQueuedWriters(3));  // queue order = creation order
 
   // Writer 3: 400 KB (total 1100 KB > 1 MB -> must NOT be included)
   writers.emplace_back([this, &statuses] {
     WriteOptions wo;
     wo.sync = true;
-    statuses[3] = Put("cap_k3", std::string(400 * 1024, 'c'), wo);
+    statuses[3] = Put("cap_k3", std::string(size_t{400} * 1024, 'c'), wo);
   });
-
-  while (dbfull()->TEST_WritersCount() < 4) {
-    std::this_thread::yield();
-  }
+  EXPECT_TRUE(WaitForQueuedWriters(4));  // queue order = creation order
 
   // Release Writer 0 (Sync 1).
   // Writer 1 batches Writer 2, stops at 1 MB cap before Writer 3, executes Sync 2.
@@ -2612,9 +2667,9 @@ TEST_F(DBTest, BuildBatchGroupOneMegabyteCap) {
   for (int i = 0; i < 4; ++i) {
     EXPECT_TRUE(statuses[i].ok());
   }
-  EXPECT_EQ(Get("cap_k1"), std::string(200 * 1024, 'a'));
-  EXPECT_EQ(Get("cap_k2"), std::string(500 * 1024, 'b'));
-  EXPECT_EQ(Get("cap_k3"), std::string(400 * 1024, 'c'));
+  EXPECT_EQ(Get("cap_k1"), std::string(size_t{200} * 1024, 'a'));
+  EXPECT_EQ(Get("cap_k2"), std::string(size_t{500} * 1024, 'b'));
+  EXPECT_EQ(Get("cap_k3"), std::string(size_t{400} * 1024, 'c'));
 
   EXPECT_EQ(env_ptr->wal_sync_count(), 3);
 }
@@ -2648,7 +2703,7 @@ TEST_F(DBTest, EmptyAndCorruptedBatchValidation) {
     wo.sync = true;
     EXPECT_TRUE(Put("lead_k", "lead_v", wo).ok());
   });
-  env_ptr->WaitForSyncToHold();
+  EXPECT_TRUE(env_ptr->WaitForSyncToHold());
 
   // Call empty and corrupted write while leader is held in Sync.
   // Since they return before queueing, they must return immediately without blocking!
@@ -2699,7 +2754,7 @@ TEST_F(DBTest, SequenceNumberOverflowOnGroup) {
 TEST_F(DBTest, MultipleFlushesInterspersedWithWrites) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 64 * 1024;
+  opts.write_buffer_size = size_t{64} * 1024;
   ASSERT_TRUE(Open(opts).ok());
 
   constexpr int kThreads = 4;

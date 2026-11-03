@@ -122,6 +122,9 @@ class DBImpl : public DB {
   Status NewDB();
   Status RecoverLogFile(uint64_t number, SequenceNumber* max_sequence, bool* corrupted);
   Status MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force = false);
+  // The write path behind Write and Flush. A nullptr batch makes the caller
+  // queue like any writer and, once it leads, force a memtable switch.
+  Status WriteImpl(const WriteOptions& opts, WriteBatch* batch);
   WriteBatch* BuildBatchGroup(Writer** last_writer);
   Status SwitchMemTable();
   void BackgroundThreadMain();
