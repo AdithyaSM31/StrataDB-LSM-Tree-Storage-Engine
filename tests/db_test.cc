@@ -2403,5 +2403,340 @@ TEST_F(DBTest, SyncThroughputTiming) {
   std::cout << "===========================\n" << std::endl;
 }
 
+TEST_F(DBTest, NonSyncLeaderDoesNotBatchSyncFollower) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
+
+  env_ptr->reset_wal_sync_count();
+  env_ptr->HoldNextSync();
+
+  std::vector<std::thread> writers;
+  std::vector<Status> statuses(5);
+
+  // Writer 0 (sync=true) is held in WAL Sync()
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[0] = Put("k0", "v0", wo);
+  });
+  env_ptr->WaitForSyncToHold();
+
+  // Writer 1 (sync=false)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = false;
+    statuses[1] = Put("k1", "v1", wo);
+  });
+
+  // Writer 2 (sync=false)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = false;
+    statuses[2] = Put("k2", "v2", wo);
+  });
+
+  // Writer 3 (sync=true)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[3] = Put("k3", "v3", wo);
+  });
+
+  // Writer 4 (sync=false)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = false;
+    statuses[4] = Put("k4", "v4", wo);
+  });
+
+  while (dbfull()->TEST_WritersCount() < 5) {
+    std::this_thread::yield();
+  }
+
+  // Release Writer 0.
+  // Writer 0 finishes (Sync 1).
+  // Writer 1 (sync=false) becomes leader. It batches Writer 2 (sync=false),
+  // but MUST STOP before Writer 3 (sync=true). Group {1, 2} committed without sync.
+  // Writer 3 (sync=true) becomes leader. It batches Writer 4 (sync=false).
+  // Group {3, 4} committed WITH sync (Sync 2).
+  env_ptr->ReleaseSync();
+
+  for (auto& t : writers) {
+    t.join();
+  }
+
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_TRUE(statuses[i].ok());
+    EXPECT_EQ(Get("k" + std::to_string(i)), "v" + std::to_string(i));
+  }
+
+  // Exactly 2 syncs: 1 for Writer 0, 1 for Writer 3's group.
+  EXPECT_EQ(env_ptr->wal_sync_count(), 2);
+}
+
+TEST_F(DBTest, BuildBatchGroupThrottlesOnSmallLeader) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
+
+  env_ptr->reset_wal_sync_count();
+  env_ptr->HoldNextSync();
+
+  std::vector<std::thread> writers;
+  std::vector<Status> statuses(4);
+
+  // Writer 0 (sync=true) holds in WAL Sync()
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[0] = Put("hold_k", "hold_v", wo);
+  });
+  env_ptr->WaitForSyncToHold();
+
+  // Writer 1: small leader batch (1 KB <= 128 KB) -> max group size = size + 128 KB (~129 KB)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[1] = Put("sm_k1", std::string(1024, 'a'), wo);
+  });
+
+  // Writer 2: follower batch of 60 KB (total so far ~61 KB <= ~129 KB -> should be included)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[2] = Put("sm_k2", std::string(60 * 1024, 'b'), wo);
+  });
+
+  // Writer 3: follower batch of 80 KB (total would be ~141 KB > ~129 KB -> must NOT be included)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[3] = Put("sm_k3", std::string(80 * 1024, 'c'), wo);
+  });
+
+  while (dbfull()->TEST_WritersCount() < 4) {
+    std::this_thread::yield();
+  }
+
+  // Release Writer 0 (Sync 1).
+  // Writer 1 batches Writer 2, stops before Writer 3, and executes Sync 2.
+  // Writer 3 becomes leader and executes Sync 3.
+  // Total syncs must be exactly 3!
+  env_ptr->ReleaseSync();
+
+  for (auto& t : writers) {
+    t.join();
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_TRUE(statuses[i].ok());
+  }
+  EXPECT_EQ(Get("hold_k"), "hold_v");
+  EXPECT_EQ(Get("sm_k1"), std::string(1024, 'a'));
+  EXPECT_EQ(Get("sm_k2"), std::string(60 * 1024, 'b'));
+  EXPECT_EQ(Get("sm_k3"), std::string(80 * 1024, 'c'));
+
+  EXPECT_EQ(env_ptr->wal_sync_count(), 3);
+}
+
+TEST_F(DBTest, BuildBatchGroupOneMegabyteCap) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
+
+  env_ptr->reset_wal_sync_count();
+  env_ptr->HoldNextSync();
+
+  std::vector<std::thread> writers;
+  std::vector<Status> statuses(4);
+
+  // Writer 0 (sync=true) holds in WAL Sync()
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[0] = Put("hold_k", "hold_v", wo);
+  });
+  env_ptr->WaitForSyncToHold();
+
+  // Writer 1: 200 KB (> 128 KB, so max_size = 1 MB)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[1] = Put("cap_k1", std::string(200 * 1024, 'a'), wo);
+  });
+
+  // Writer 2: 500 KB (total 700 KB <= 1 MB -> included)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[2] = Put("cap_k2", std::string(500 * 1024, 'b'), wo);
+  });
+
+  // Writer 3: 400 KB (total 1100 KB > 1 MB -> must NOT be included)
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[3] = Put("cap_k3", std::string(400 * 1024, 'c'), wo);
+  });
+
+  while (dbfull()->TEST_WritersCount() < 4) {
+    std::this_thread::yield();
+  }
+
+  // Release Writer 0 (Sync 1).
+  // Writer 1 batches Writer 2, stops at 1 MB cap before Writer 3, executes Sync 2.
+  // Writer 3 executes Sync 3.
+  // Total syncs must be exactly 3!
+  env_ptr->ReleaseSync();
+
+  for (auto& t : writers) {
+    t.join();
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_TRUE(statuses[i].ok());
+  }
+  EXPECT_EQ(Get("cap_k1"), std::string(200 * 1024, 'a'));
+  EXPECT_EQ(Get("cap_k2"), std::string(500 * 1024, 'b'));
+  EXPECT_EQ(Get("cap_k3"), std::string(400 * 1024, 'c'));
+
+  EXPECT_EQ(env_ptr->wal_sync_count(), 3);
+}
+
+TEST_F(DBTest, EmptyAndCorruptedBatchValidation) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // 1. Empty batch returns OK and does not increment sequence number
+  WriteBatch empty;
+  EXPECT_TRUE(db_->Write(WriteOptions(), &empty).ok());
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 0u);
+
+  // 2. Corrupted batch returns Corruption and does not increment sequence number
+  WriteBatch corrupted;
+  WriteBatchInternal::SetContents(&corrupted, "too_small");
+  Status s = db_->Write(WriteOptions(), &corrupted);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 0u);
+
+  // 3. Concurrency check: an empty batch and an invalid batch do not block or join the queue
+  env_ptr->HoldNextSync();
+  std::thread leader([this] {
+    WriteOptions wo;
+    wo.sync = true;
+    EXPECT_TRUE(Put("lead_k", "lead_v", wo).ok());
+  });
+  env_ptr->WaitForSyncToHold();
+
+  // Call empty and corrupted write while leader is held in Sync.
+  // Since they return before queueing, they must return immediately without blocking!
+  WriteBatch empty2;
+  EXPECT_TRUE(db_->Write(WriteOptions(), &empty2).ok());
+
+  WriteBatch corrupted2;
+  WriteBatchInternal::SetContents(&corrupted2, "bad_payload");
+  EXPECT_TRUE(db_->Write(WriteOptions(), &corrupted2).IsCorruption());
+
+  // Leader was the only writer in writers_
+  EXPECT_EQ(dbfull()->TEST_WritersCount(), 1);
+
+  env_ptr->ReleaseSync();
+  leader.join();
+
+  EXPECT_EQ(Get("lead_k"), "lead_v");
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 1u);
+}
+
+TEST_F(DBTest, SequenceNumberOverflowOnGroup) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Set sequence number close to maximum: kMaxSequenceNumber - 2
+  constexpr SequenceNumber kNearMax = kMaxSequenceNumber - 2;
+  dbfull()->TEST_SetLastSequence(kNearMax);
+
+  // A single put of 1 key succeeds (kNearMax + 1 <= kMaxSequenceNumber)
+  EXPECT_TRUE(Put("ok_k", "ok_v").ok());
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), kNearMax + 1);
+
+  // Now LastSequence is kMaxSequenceNumber - 1.
+  // A batch of 2 keys would reach kMaxSequenceNumber + 1 > kMaxSequenceNumber.
+  WriteBatch batch;
+  batch.Put("overflow_k1", "v1");
+  batch.Put("overflow_k2", "v2");
+  Status s = db_->Write(WriteOptions(), &batch);
+  EXPECT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  EXPECT_NE(s.ToString().find("sequence number overflow"), std::string::npos);
+
+  // Verify that an invalid batch sequence error did not corrupt DB state
+  // and LastSequence remains at kMaxSequenceNumber - 1
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), kNearMax + 1);
+}
+
+TEST_F(DBTest, MultipleFlushesInterspersedWithWrites) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 64 * 1024;
+  ASSERT_TRUE(Open(opts).ok());
+
+  constexpr int kThreads = 4;
+  constexpr int kOpsPerThread = 200;
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([this, t] {
+      for (int i = 0; i < kOpsPerThread; ++i) {
+        std::string key = "th_" + std::to_string(t) + "_k_" + std::to_string(i);
+        std::string val = "val_" + std::to_string(i);
+        WriteOptions wo;
+        wo.sync = (i % 5 == 0);
+        EXPECT_TRUE(Put(key, val, wo).ok());
+        if (i % 20 == 0) {
+          EXPECT_TRUE(db_->Flush().ok());
+        }
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // Final flush to ensure everything is durable
+  EXPECT_TRUE(db_->Flush().ok());
+
+  for (int t = 0; t < kThreads; ++t) {
+    for (int i = 0; i < kOpsPerThread; ++i) {
+      std::string key = "th_" + std::to_string(t) + "_k_" + std::to_string(i);
+      std::string val = "val_" + std::to_string(i);
+      EXPECT_EQ(Get(key), val);
+    }
+  }
+}
+
 }  // namespace
 }  // namespace strata

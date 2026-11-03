@@ -108,6 +108,7 @@ class DBImpl : public DB {
   std::string TEST_CompactPointer(int level);
   int TEST_WritersCount();
   SequenceNumber TEST_LastSequence();
+  void TEST_SetLastSequence(SequenceNumber seq);
 
  private:
   struct Writer {

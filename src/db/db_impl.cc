@@ -912,6 +912,11 @@ SequenceNumber DBImpl::TEST_LastSequence() {
   return versions_->LastSequence();
 }
 
+void DBImpl::TEST_SetLastSequence(SequenceNumber seq) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  versions_->SetLastSequence(seq);
+}
+
 Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
   int max_level_with_files = 1;
   std::string begin_str(begin);
