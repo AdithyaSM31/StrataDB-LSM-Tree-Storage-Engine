@@ -100,9 +100,4 @@ std::unique_ptr<Iterator> TableCache::NewIterator(const ReadOptions& options, ui
   return std::make_unique<TableIteratorWrapper>(table, table->NewIterator(options));
 }
 
-std::unique_ptr<Iterator> TableCache::NewIterator(uint64_t number, uint64_t file_size,
-                                                  Table** tableptr) {
-  return NewIterator(ReadOptions(), number, file_size, tableptr);
-}
-
 }  // namespace strata

@@ -149,10 +149,6 @@ Status Version::Get(const ReadOptions& options, const LookupKey& key, std::strin
   return Status::NotFound("key not found");
 }
 
-Status Version::Get(const LookupKey& key, std::string* value, TableCache* cache) const {
-  return Get(ReadOptions(), key, value, cache);
-}
-
 std::string Version::DebugString() const {
   std::ostringstream ss;
   ss << "Version { ";
@@ -920,11 +916,6 @@ std::unique_ptr<Iterator> NewLevelFileIterator(const ReadOptions& options,
     return cache->NewIterator(options, number, file_size);
   };
   return NewTwoLevelIterator(std::move(index_iter), std::move(open_file));
-}
-
-std::unique_ptr<Iterator> NewLevelFileIterator(const InternalKeyComparator* icmp, TableCache* cache,
-                                               std::vector<FileMetaData*> files) {
-  return NewLevelFileIterator(ReadOptions(), icmp, cache, std::move(files));
 }
 
 }  // namespace strata

@@ -208,7 +208,7 @@ class DBTest : public ::testing::Test {
       return -1;
     }
     int count = 0;
-    std::unique_ptr<Iterator> it = table->NewIterator();
+    std::unique_ptr<Iterator> it = table->NewIterator(ReadOptions());
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
       ++count;
     }
@@ -1362,8 +1362,8 @@ TEST_F(DBTest, MaxOpenFilesIsClamped) {
   ASSERT_TRUE(Open(opts).ok());
   auto* impl = static_cast<DBImpl*>(db_.get());
   EXPECT_EQ(impl->TEST_options().max_open_files, 64);
-  // Clamped to at least 64. TableCache capacity is clamped to 64 - 10 = 54.
-  // Across 16 shards (each with ceil(54/16) = 4), total charge is bounded by 64.
+  // Clamped to at least 64. TableCache capacity is 64 - 10 = 54, split across
+  // 16 shards so that the shard capacities sum to exactly 54.
   for (int i = 0; i < 70; ++i) {
     ASSERT_TRUE(Put("k" + std::to_string(i), "v").ok());
     ASSERT_TRUE(db_->Flush().ok());
@@ -1371,7 +1371,7 @@ TEST_F(DBTest, MaxOpenFilesIsClamped) {
   for (int i = 0; i < 70; ++i) {
     EXPECT_EQ(Get("k" + std::to_string(i)), "v");
   }
-  EXPECT_LE(impl->table_cache()->TotalCharge(), 64u);
+  EXPECT_LE(impl->TEST_table_cache()->TotalCharge(), 54u);
 
   // Upper clamp: max_open_files > 50000 is clamped to 50000.
   Close();
@@ -2883,7 +2883,7 @@ TEST_F(DBTest, SecondReadIsFree) {
   ASSERT_TRUE(db_->Flush().ok());
 
   auto* impl = static_cast<DBImpl*>(db_.get());
-  ASSERT_NE(impl->block_cache(), nullptr);
+  ASSERT_NE(impl->TEST_block_cache(), nullptr);
 
   // 1. First read with fill_cache = true
   env_ptr->ResetReads();
@@ -2892,7 +2892,7 @@ TEST_F(DBTest, SecondReadIsFree) {
   std::string val;
   EXPECT_TRUE(db_->Get(cache_ropts, "k1_10", &val).ok());
   EXPECT_GT(env_ptr->total_reads(), 0);
-  const size_t charge_after_first = impl->block_cache()->TotalCharge();
+  const size_t charge_after_first = impl->TEST_block_cache()->TotalCharge();
   EXPECT_GT(charge_after_first, 0u);
 
   // 2. Second read of same key: block is cached, zero file reads!
@@ -2906,13 +2906,13 @@ TEST_F(DBTest, SecondReadIsFree) {
   env_ptr->ResetReads();
   EXPECT_TRUE(db_->Get(no_cache_ropts, "k2_10", &val).ok());
   EXPECT_GT(env_ptr->total_reads(), 0);
-  EXPECT_EQ(impl->block_cache()->TotalCharge(), charge_after_first);  // cache doesn't grow
+  EXPECT_EQ(impl->TEST_block_cache()->TotalCharge(), charge_after_first);  // cache doesn't grow
 
   // 4. Read again with fill_cache = false: reads again from disk
   env_ptr->ResetReads();
   EXPECT_TRUE(db_->Get(no_cache_ropts, "k2_10", &val).ok());
   EXPECT_GT(env_ptr->total_reads(), 0);
-  EXPECT_EQ(impl->block_cache()->TotalCharge(), charge_after_first);
+  EXPECT_EQ(impl->TEST_block_cache()->TotalCharge(), charge_after_first);
 }
 
 TEST_F(DBTest, FileLimitHolds) {
@@ -2990,7 +2990,7 @@ TEST_F(DBTest, FileLimitHolds) {
 
   uint64_t file_size = 0;
   ASSERT_TRUE(env_ptr->GetFileSize(TableFileName(test_dir_, pinned_file_number), &file_size).ok());
-  auto iter = static_cast<DBImpl*>(db_.get())->table_cache()->NewIterator(
+  auto iter = static_cast<DBImpl*>(db_.get())->TEST_table_cache()->NewIterator(
       ReadOptions(), pinned_file_number, file_size);
   ASSERT_NE(iter, nullptr);
 
@@ -3039,15 +3039,15 @@ TEST_F(DBTest, CompactionDoesntTouchTheCache) {
   EXPECT_TRUE(db_->Get(ropts, "k0", &val).ok());
 
   auto* impl = static_cast<DBImpl*>(db_.get());
-  ASSERT_NE(impl->block_cache(), nullptr);
-  const uint64_t inserts_before = impl->block_cache()->inserts();
+  ASSERT_NE(impl->TEST_block_cache(), nullptr);
+  const uint64_t inserts_before = impl->TEST_block_cache()->inserts();
   EXPECT_GT(inserts_before, 0u);
 
   // Compact the entire DB. Compaction reads must use fill_cache = false!
   ASSERT_TRUE(db_->CompactRange("", "").ok());
 
   // Cache inserts count must remain identical
-  EXPECT_EQ(impl->block_cache()->inserts(), inserts_before);
+  EXPECT_EQ(impl->TEST_block_cache()->inserts(), inserts_before);
 }
 
 TEST_F(DBTest, BlockCacheCapacitySmallerThanBlockSize) {
@@ -3063,14 +3063,14 @@ TEST_F(DBTest, BlockCacheCapacitySmallerThanBlockSize) {
   ASSERT_TRUE(db_->Flush().ok());
 
   auto* impl = static_cast<DBImpl*>(db_.get());
-  ASSERT_NE(impl->block_cache(), nullptr);
+  ASSERT_NE(impl->TEST_block_cache(), nullptr);
 
   // Read keys. Since each block is ~4KB, which is > 100 bytes capacity (and > per-shard capacity),
   // blocks cannot fit in any shard. Reading must succeed correctly without caching.
   for (int i = 0; i < 50; ++i) {
     EXPECT_EQ(Get("key_" + std::to_string(i)), std::string(200, 'x'));
   }
-  EXPECT_EQ(impl->block_cache()->TotalCharge(), 0u);
+  EXPECT_EQ(impl->TEST_block_cache()->TotalCharge(), 0u);
 }
 
 TEST_F(DBTest, BlockCacheCapacityZero) {
@@ -3080,7 +3080,7 @@ TEST_F(DBTest, BlockCacheCapacityZero) {
   ASSERT_TRUE(Open(options).ok());
 
   auto* impl = static_cast<DBImpl*>(db_.get());
-  EXPECT_EQ(impl->block_cache(), nullptr);
+  EXPECT_EQ(impl->TEST_block_cache(), nullptr);
 
   for (int i = 0; i < 20; ++i) {
     ASSERT_TRUE(Put("k_" + std::to_string(i), "v_" + std::to_string(i)).ok());

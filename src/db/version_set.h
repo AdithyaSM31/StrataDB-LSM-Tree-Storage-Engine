@@ -36,7 +36,6 @@ class Version {
 
   Status Get(const ReadOptions& options, const LookupKey& key, std::string* value,
              TableCache* cache) const;
-  Status Get(const LookupKey& key, std::string* value, TableCache* cache) const;
 
   const std::vector<FileMetaData*>& files(int level) const {
     STRATA_DCHECK(level >= 0 && level < kNumLevels);
@@ -235,8 +234,6 @@ class Compaction {
 // opening each file through the table cache only when the scan reaches it.
 std::unique_ptr<Iterator> NewLevelFileIterator(const ReadOptions& options,
                                                const InternalKeyComparator* icmp, TableCache* cache,
-                                               std::vector<FileMetaData*> files);
-std::unique_ptr<Iterator> NewLevelFileIterator(const InternalKeyComparator* icmp, TableCache* cache,
                                                std::vector<FileMetaData*> files);
 
 }  // namespace strata

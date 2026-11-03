@@ -674,34 +674,34 @@ TEST_F(VersionSetTest, VersionGetL1BinarySearch) {
   std::string val;
 
   // Key in first table
-  Status s = vset.current()->Get(LookupKey("b", 10), &val, &cache);
+  Status s = vset.current()->Get(ReadOptions(), LookupKey("b", 10), &val, &cache);
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(val, "val_b");
 
   // Key before first table
-  s = vset.current()->Get(LookupKey("0", 10), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("0", 10), &val, &cache);
   EXPECT_TRUE(s.IsNotFound());
 
   // Key in gap between table 1 and table 2
-  s = vset.current()->Get(LookupKey("d", 10), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("d", 10), &val, &cache);
   EXPECT_TRUE(s.IsNotFound());
 
   // Key in middle table
-  s = vset.current()->Get(LookupKey("f", 10), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("f", 10), &val, &cache);
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(val, "val_f");
 
   // Deleted key (tombstone) in third table
-  s = vset.current()->Get(LookupKey("q", 10), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("q", 10), &val, &cache);
   EXPECT_TRUE(s.IsNotFound());
 
   // Key in third table
-  s = vset.current()->Get(LookupKey("z", 10), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("z", 10), &val, &cache);
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(val, "val_z");
 
   // Key after third table
-  s = vset.current()->Get(LookupKey("zzz", 10), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("zzz", 10), &val, &cache);
   EXPECT_TRUE(s.IsNotFound());
 }
 
@@ -733,16 +733,16 @@ TEST_F(VersionSetTest, VersionGetMultiLevelHiding) {
   std::string val;
 
   // k1: L1 value hides L2 value
-  Status s = vset.current()->Get(LookupKey("k1", 20), &val, &cache);
+  Status s = vset.current()->Get(ReadOptions(), LookupKey("k1", 20), &val, &cache);
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(val, "v1_l1");
 
   // k2: L1 tombstone hides L2 value
-  s = vset.current()->Get(LookupKey("k2", 20), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("k2", 20), &val, &cache);
   EXPECT_TRUE(s.IsNotFound());
 
   // k3: L0 value hides L2 value
-  s = vset.current()->Get(LookupKey("k3", 20), &val, &cache);
+  s = vset.current()->Get(ReadOptions(), LookupKey("k3", 20), &val, &cache);
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(val, "v3_l0");
 }

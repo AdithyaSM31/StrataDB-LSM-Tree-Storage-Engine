@@ -30,14 +30,9 @@ class TableCache {
   // Opens (or reuses) the table and returns an iterator over its contents.
   std::unique_ptr<Iterator> NewIterator(const ReadOptions& options, uint64_t number,
                                         uint64_t file_size, Table** tableptr = nullptr);
-  std::unique_ptr<Iterator> NewIterator(uint64_t number, uint64_t file_size,
-                                        Table** tableptr = nullptr);
 
   // Erases the table for this file number from the cache when the file is deleted.
   void Erase(uint64_t number);
-
-  // Backward compatibility alias for Erase.
-  void Evict(uint64_t number) { Erase(number); }
 
   // Total open tables currently in cache.
   size_t TotalCharge() const { return cache_->TotalCharge(); }

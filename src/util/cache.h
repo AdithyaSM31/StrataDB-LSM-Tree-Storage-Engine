@@ -122,10 +122,15 @@ class ShardedLRUCache {
   static constexpr int kNumShardBits = 4;
   static constexpr int kNumShards = 1 << kNumShardBits;  // 16
 
+  // Splits `capacity` so the shards sum to exactly `capacity`: each gets
+  // capacity / 16, and the first capacity % 16 shards get one more. Rounding
+  // every shard up would let the cache hold up to 15 more than asked, which
+  // matters for the table cache, where each unit is an open file descriptor.
   explicit ShardedLRUCache(size_t capacity) : capacity_(capacity) {
-    const size_t per_shard = (capacity + kNumShards - 1) / kNumShards;
-    for (int i = 0; i < kNumShards; ++i) {
-      shards_[i] = std::make_unique<LRUCache<V>>(per_shard);
+    const size_t base = capacity / kNumShards;
+    const size_t remainder = capacity % kNumShards;
+    for (size_t i = 0; i < kNumShards; ++i) {
+      shards_[i] = std::make_unique<LRUCache<V>>(base + (i < remainder ? 1 : 0));
     }
   }
 

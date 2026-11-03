@@ -46,7 +46,6 @@ class Table {
   // Iterates over every entry (internal key -> value). The table must outlive
   // the iterator. Errors reading data blocks are reported by status().
   std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) const;
-  std::unique_ptr<Iterator> NewIterator() const;
 
   // Point lookup for the read path. Finds the first entry whose internal key
   // is >= `internal_key` and copies it into *key and *value, setting *found.
@@ -57,8 +56,6 @@ class Table {
   // key and the type, exactly as MemTable::Get does.
   Status InternalGet(const ReadOptions& options, std::string_view internal_key, bool* found,
                      std::string* key, std::string* value) const;
-  Status InternalGet(std::string_view internal_key, bool* found, std::string* key,
-                     std::string* value) const;
 
   // True if the table has a usable bloom filter (for tests and stats).
   bool has_filter() const { return filter_.has_value(); }

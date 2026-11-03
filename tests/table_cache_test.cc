@@ -80,7 +80,7 @@ TEST_F(TableCacheTest, OpenedOnceAndReused) {
 
   bool found = false;
   std::string k, v;
-  s = t1->InternalGet(LookupKey("hello", 10).internal_key(), &found, &k, &v);
+  s = t1->InternalGet(ReadOptions(), LookupKey("hello", 10).internal_key(), &found, &k, &v);
   EXPECT_TRUE(s.ok());
   EXPECT_TRUE(found);
   EXPECT_EQ(v, "world");
@@ -98,7 +98,7 @@ TEST_F(TableCacheTest, EvictWorksAndSharedPtrStaysAlive) {
   ASSERT_TRUE(s.ok()) << s.ToString();
 
   // Evict the table
-  cache.Evict(file_num);
+  cache.Erase(file_num);
 
   // Next lookup re-opens the file
   std::shared_ptr<Table> t2;
@@ -109,13 +109,13 @@ TEST_F(TableCacheTest, EvictWorksAndSharedPtrStaysAlive) {
   // Both the old instance and new instance can be read safely
   bool found = false;
   std::string k, v;
-  s = t1->InternalGet(LookupKey("foo", 10).internal_key(), &found, &k, &v);
+  s = t1->InternalGet(ReadOptions(), LookupKey("foo", 10).internal_key(), &found, &k, &v);
   EXPECT_TRUE(s.ok());
   EXPECT_TRUE(found);
   EXPECT_EQ(v, "bar");
 
   found = false;
-  s = t2->InternalGet(LookupKey("foo", 10).internal_key(), &found, &k, &v);
+  s = t2->InternalGet(ReadOptions(), LookupKey("foo", 10).internal_key(), &found, &k, &v);
   EXPECT_TRUE(s.ok());
   EXPECT_TRUE(found);
   EXPECT_EQ(v, "bar");
@@ -196,7 +196,7 @@ TEST_F(TableCacheTest, IteratorKeepsEvictedTableValid) {
   uint64_t f1 = 500;
   uint64_t sz1 = BuildTestTable(f1, "target_key", "target_val");
 
-  std::unique_ptr<Iterator> iter = cache.NewIterator(f1, sz1);
+  std::unique_ptr<Iterator> iter = cache.NewIterator(ReadOptions(), f1, sz1);
   ASSERT_TRUE(iter->status().ok());
 
   // Now erase/evict f1 from cache
@@ -228,7 +228,7 @@ TEST_F(TableCacheTest, MultiplePinnedIteratorsExceedCapacity) {
   // Open 25 simultaneous iterators (exceeding table cache capacity 16)
   std::vector<std::unique_ptr<Iterator>> iters;
   for (int i = 0; i < kNumTables; ++i) {
-    auto iter = cache.NewIterator(file_nums[i], file_sizes[i]);
+    auto iter = cache.NewIterator(ReadOptions(), file_nums[i], file_sizes[i]);
     ASSERT_TRUE(iter->status().ok());
     iters.push_back(std::move(iter));
   }

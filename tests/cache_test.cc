@@ -171,9 +171,9 @@ TEST(LRUCacheTest, Concurrency) {
     threads.emplace_back([&cache, t]() {
       Random rnd(1000 + t);
       for (int i = 0; i < kOpsPerThread; ++i) {
-        int key_num = rnd.Next() % 200;
+        const uint32_t key_num = rnd.Uniform(200);
         std::string key = "key_" + std::to_string(key_num);
-        int op = rnd.Next() % 3;
+        const uint32_t op = rnd.Uniform(3);
         if (op == 0) {
           cache.Lookup(key);
         } else if (op == 1) {
@@ -238,7 +238,7 @@ TEST(ShardedLRUCacheTest, NewIdIsMonotonicAndUnique) {
 }
 
 TEST(ShardedLRUCacheTest, ShardEvictionAndCapacity) {
-  // 16 shards, each with capacity ceil(160 / 16) = 10
+  // 16 shards, each with capacity 160 / 16 = 10
   ShardedLRUCache<std::string> cache(160);
   for (int i = 0; i < 16; ++i) {
     EXPECT_EQ(cache.shard(i)->capacity(), 10u);
@@ -254,6 +254,46 @@ TEST(ShardedLRUCacheTest, ShardEvictionAndCapacity) {
   EXPECT_LE(cache.TotalCharge(), 160u);
 }
 
+TEST(ShardedLRUCacheTest, ShardCapacitiesSumToCapacity) {
+  // 54 = 16 * 3 + 6: the first 6 shards get 4, the other 10 get 3.
+  ShardedLRUCache<std::string> cache(54);
+  size_t sum = 0;
+  for (size_t i = 0; i < ShardedLRUCache<std::string>::kNumShards; ++i) {
+    EXPECT_EQ(cache.shard(i)->capacity(), i < 6 ? 4u : 3u) << "shard " << i;
+    sum += cache.shard(i)->capacity();
+  }
+  EXPECT_EQ(sum, 54u);
+
+  // Fewer units than shards: some shards get nothing.
+  ShardedLRUCache<std::string> tiny(5);
+  sum = 0;
+  for (size_t i = 0; i < ShardedLRUCache<std::string>::kNumShards; ++i) {
+    sum += tiny.shard(i)->capacity();
+  }
+  EXPECT_EQ(sum, 5u);
+}
+
+TEST(ShardedLRUCacheTest, KeysSpreadAcrossShards) {
+  // With every key in one shard the cache would hold at most 1600 / 16 = 100
+  // entries; spread over 16 shards, 1000 entries of charge 1 all fit.
+  ShardedLRUCache<std::string> cache(1600);
+  for (int i = 0; i < 1000; ++i) {
+    cache.Insert("key_" + std::to_string(i), std::make_shared<std::string>("v"), 1);
+  }
+  EXPECT_EQ(cache.TotalCharge(), 1000u);
+
+  // Expect about 62 per shard; every shard should have a fair share.
+  int used_shards = 0;
+  for (size_t i = 0; i < ShardedLRUCache<std::string>::kNumShards; ++i) {
+    const size_t charge = cache.shard(i)->TotalCharge();
+    EXPECT_GT(charge, 20u) << "shard " << i;
+    if (charge > 0) {
+      ++used_shards;
+    }
+  }
+  EXPECT_EQ(used_shards, ShardedLRUCache<std::string>::kNumShards);
+}
+
 TEST(ShardedLRUCacheTest, Concurrency) {
   constexpr size_t kCapacity = 1600;
   ShardedLRUCache<std::string> cache(kCapacity);
@@ -267,9 +307,9 @@ TEST(ShardedLRUCacheTest, Concurrency) {
     threads.emplace_back([&cache, t]() {
       Random rnd(2000 + t);
       for (int i = 0; i < kOpsPerThread; ++i) {
-        int key_num = rnd.Next() % 500;
+        const uint32_t key_num = rnd.Uniform(500);
         std::string key = "key_" + std::to_string(key_num);
-        int op = rnd.Next() % 3;
+        const uint32_t op = rnd.Uniform(3);
         if (op == 0) {
           cache.Lookup(key);
         } else if (op == 1) {

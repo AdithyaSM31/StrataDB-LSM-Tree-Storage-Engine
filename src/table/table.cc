@@ -166,8 +166,6 @@ std::unique_ptr<Iterator> Table::NewIterator(const ReadOptions& options) const {
       [this, options](std::string_view index_value) { return BlockReader(options, index_value); });
 }
 
-std::unique_ptr<Iterator> Table::NewIterator() const { return NewIterator(ReadOptions()); }
-
 Status Table::InternalGet(const ReadOptions& options, std::string_view internal_key, bool* found,
                           std::string* key, std::string* value) const {
   *found = false;
@@ -194,11 +192,6 @@ Status Table::InternalGet(const ReadOptions& options, std::string_view internal_
     value->assign(block_iter->value().data(), block_iter->value().size());
   }
   return block_iter->status();
-}
-
-Status Table::InternalGet(std::string_view internal_key, bool* found, std::string* key,
-                          std::string* value) const {
-  return InternalGet(ReadOptions(), internal_key, found, key, value);
 }
 
 }  // namespace strata
