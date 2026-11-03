@@ -194,5 +194,104 @@ TEST(LRUCacheTest, Concurrency) {
   EXPECT_LE(cache.TotalCharge(), kCapacity);
 }
 
+TEST(ShardedLRUCacheTest, CountersAndBasics) {
+  ShardedLRUCache<std::string> cache(1600);
+  EXPECT_EQ(cache.hits(), 0u);
+  EXPECT_EQ(cache.misses(), 0u);
+  EXPECT_EQ(cache.inserts(), 0u);
+
+  // Miss
+  EXPECT_EQ(cache.Lookup("missing"), nullptr);
+  EXPECT_EQ(cache.hits(), 0u);
+  EXPECT_EQ(cache.misses(), 1u);
+
+  // Insert
+  auto val1 = std::make_shared<std::string>("hello");
+  auto inserted = cache.Insert("key1", val1, 20);
+  EXPECT_EQ(inserted, val1);
+  EXPECT_EQ(cache.inserts(), 1u);
+  EXPECT_EQ(cache.TotalCharge(), 20u);
+
+  // Hit
+  auto hit = cache.Lookup("key1");
+  ASSERT_NE(hit, nullptr);
+  EXPECT_EQ(*hit, "hello");
+  EXPECT_EQ(cache.hits(), 1u);
+  EXPECT_EQ(cache.misses(), 1u);
+
+  // Erase
+  cache.Erase("key1");
+  EXPECT_EQ(cache.Lookup("key1"), nullptr);
+  EXPECT_EQ(cache.hits(), 1u);
+  EXPECT_EQ(cache.misses(), 2u);
+  EXPECT_EQ(cache.TotalCharge(), 0u);
+}
+
+TEST(ShardedLRUCacheTest, NewIdIsMonotonicAndUnique) {
+  ShardedLRUCache<std::string> cache(100);
+  uint64_t id1 = cache.NewId();
+  uint64_t id2 = cache.NewId();
+  uint64_t id3 = cache.NewId();
+  EXPECT_GT(id1, 0u);
+  EXPECT_EQ(id2, id1 + 1);
+  EXPECT_EQ(id3, id2 + 1);
+}
+
+TEST(ShardedLRUCacheTest, ShardEvictionAndCapacity) {
+  // 16 shards, each with capacity ceil(160 / 16) = 10
+  ShardedLRUCache<std::string> cache(160);
+  for (int i = 0; i < 16; ++i) {
+    EXPECT_EQ(cache.shard(i)->capacity(), 10u);
+  }
+
+  // Insert items with charge 1
+  for (int i = 0; i < 300; ++i) {
+    std::string key = "item_" + std::to_string(i);
+    cache.Insert(key, std::make_shared<std::string>("data"), 1);
+  }
+
+  // Each shard has capacity 10, so total charge cannot exceed 16 * 10 = 160
+  EXPECT_LE(cache.TotalCharge(), 160u);
+}
+
+TEST(ShardedLRUCacheTest, Concurrency) {
+  constexpr size_t kCapacity = 1600;
+  ShardedLRUCache<std::string> cache(kCapacity);
+  constexpr int kNumThreads = 8;
+  constexpr int kOpsPerThread = 5000;
+
+  std::vector<std::thread> threads;
+  threads.reserve(kNumThreads);
+
+  for (int t = 0; t < kNumThreads; ++t) {
+    threads.emplace_back([&cache, t]() {
+      Random rnd(2000 + t);
+      for (int i = 0; i < kOpsPerThread; ++i) {
+        int key_num = rnd.Next() % 500;
+        std::string key = "key_" + std::to_string(key_num);
+        int op = rnd.Next() % 3;
+        if (op == 0) {
+          cache.Lookup(key);
+        } else if (op == 1) {
+          auto val = std::make_shared<std::string>("val_" + std::to_string(key_num));
+          size_t charge = 1 + (rnd.Next() % 10);
+          cache.Insert(key, val, charge);
+        } else {
+          cache.Erase(key);
+        }
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // 16 shards, each capacity 100. Total charge <= 1600
+  EXPECT_LE(cache.TotalCharge(), 1600u);
+  EXPECT_GT(cache.hits() + cache.misses(), 0u);
+  EXPECT_GT(cache.inserts(), 0u);
+}
+
 }  // namespace
 }  // namespace strata

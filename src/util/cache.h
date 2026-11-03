@@ -1,6 +1,8 @@
 #ifndef STRATA_UTIL_CACHE_H_
 #define STRATA_UTIL_CACHE_H_
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <list>
@@ -9,6 +11,9 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+
+#include "util/hash.h"
 
 namespace strata {
 
@@ -106,6 +111,83 @@ class LRUCache {
   std::unordered_map<std::string_view, typename std::list<Entry>::iterator> index_;
   size_t capacity_;
   size_t usage_ = 0;
+};
+
+// A thread-safe LRU cache sharded into 16 independent LRUCache shards to reduce
+// lock contention across concurrent readers and writers.
+template <typename V>
+class ShardedLRUCache {
+ public:
+  static constexpr int kNumShardBits = 4;
+  static constexpr int kNumShards = 1 << kNumShardBits;  // 16
+
+  explicit ShardedLRUCache(size_t capacity) : capacity_(capacity) {
+    const size_t per_shard = (capacity + kNumShards - 1) / kNumShards;
+    for (int i = 0; i < kNumShards; ++i) {
+      shards_[i] = std::make_unique<LRUCache<V>>(per_shard);
+    }
+  }
+
+  ~ShardedLRUCache() = default;
+
+  ShardedLRUCache(const ShardedLRUCache&) = delete;
+  ShardedLRUCache& operator=(const ShardedLRUCache&) = delete;
+  ShardedLRUCache(ShardedLRUCache&&) = delete;
+  ShardedLRUCache& operator=(ShardedLRUCache&&) = delete;
+
+  // Looks up `key` in the appropriate shard. Updates hit/miss counters.
+  std::shared_ptr<V> Lookup(std::string_view key) {
+    const size_t s = Shard(key);
+    auto val = shards_[s]->Lookup(key);
+    if (val != nullptr) {
+      hits_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      misses_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return val;
+  }
+
+  // Inserts `key` -> `value` into the appropriate shard. Updates insert counter.
+  std::shared_ptr<V> Insert(std::string_view key, std::shared_ptr<V> value, size_t charge) {
+    inserts_.fetch_add(1, std::memory_order_relaxed);
+    const size_t s = Shard(key);
+    return shards_[s]->Insert(key, std::move(value), charge);
+  }
+
+  // Erases `key` from the appropriate shard if present.
+  void Erase(std::string_view key) {
+    const size_t s = Shard(key);
+    shards_[s]->Erase(key);
+  }
+
+  // Total charge currently held across all 16 shards.
+  size_t TotalCharge() const {
+    size_t total = 0;
+    for (const auto& shard : shards_) {
+      total += shard->TotalCharge();
+    }
+    return total;
+  }
+
+  // Returns a new unique 64-bit identifier for cache keys (e.g. table cache_id).
+  uint64_t NewId() { return last_id_.fetch_add(1, std::memory_order_relaxed) + 1; }
+
+  uint64_t hits() const { return hits_.load(std::memory_order_relaxed); }
+  uint64_t misses() const { return misses_.load(std::memory_order_relaxed); }
+  uint64_t inserts() const { return inserts_.load(std::memory_order_relaxed); }
+  size_t capacity() const { return capacity_; }
+
+  LRUCache<V>* shard(size_t index) { return shards_[index].get(); }
+
+ private:
+  static size_t Shard(std::string_view key) { return Hash(key) >> (32 - kNumShardBits); }
+
+  const size_t capacity_;
+  std::array<std::unique_ptr<LRUCache<V>>, kNumShards> shards_;
+  mutable std::atomic<uint64_t> hits_{0};
+  mutable std::atomic<uint64_t> misses_{0};
+  mutable std::atomic<uint64_t> inserts_{0};
+  std::atomic<uint64_t> last_id_{0};
 };
 
 }  // namespace strata
