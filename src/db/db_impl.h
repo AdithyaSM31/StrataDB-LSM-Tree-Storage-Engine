@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -21,6 +22,7 @@
 #include "strata/env.h"
 #include "strata/options.h"
 #include "strata/status.h"
+#include "strata/write_batch.h"
 
 namespace strata {
 
@@ -104,11 +106,22 @@ class DBImpl : public DB {
   std::vector<FileMetaData> TEST_LevelFiles(int level);
   // The round-robin compaction pointer for a level ("" if never set).
   std::string TEST_CompactPointer(int level);
+  int TEST_WritersCount();
+  SequenceNumber TEST_LastSequence();
 
  private:
+  struct Writer {
+    WriteBatch* batch = nullptr;  // nullptr means "just make room" (used by Flush)
+    bool sync = false;
+    bool done = false;
+    Status status;
+    std::condition_variable cv;
+  };
+
   Status NewDB();
   Status RecoverLogFile(uint64_t number, SequenceNumber* max_sequence, bool* corrupted);
-  Status MakeRoomForWrite(std::unique_lock<std::mutex>* lock);
+  Status MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force = false);
+  WriteBatch* BuildBatchGroup(Writer** last_writer);
   Status SwitchMemTable();
   void BackgroundThreadMain();
   bool HasBackgroundWork() const;
@@ -136,6 +149,8 @@ class DBImpl : public DB {
   const InternalKeyComparator icmp_;
 
   std::mutex mutex_;
+  std::deque<Writer*> writers_;  // guarded by mutex_
+  WriteBatch tmp_batch_;         // the merged group; only the leader touches it
   std::unique_ptr<FileLock> db_lock_;
   std::unique_ptr<VersionSet> versions_;  // guarded by mutex_
   MemTable* mem_ = nullptr;               // Ref'd; guarded by mutex_

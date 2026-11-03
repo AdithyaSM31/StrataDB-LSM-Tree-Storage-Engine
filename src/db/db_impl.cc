@@ -426,8 +426,8 @@ Status DBImpl::SwitchMemTable() {
   return Status::OK();
 }
 
-Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock) {
-  bool allow_delay = true;
+Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force) {
+  bool allow_delay = !force;
   while (true) {
     if (!bg_error_.ok()) {
       return bg_error_;
@@ -440,7 +440,11 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock) {
       lock->lock();
       continue;
     }
-    if (mem_->IsEmpty() || mem_->ApproximateMemoryUsage() <= options_.write_buffer_size) {
+    if (!force &&
+        (mem_->IsEmpty() || mem_->ApproximateMemoryUsage() <= options_.write_buffer_size)) {
+      return Status::OK();
+    }
+    if (force && mem_->IsEmpty()) {
       return Status::OK();
     }
     if (imm_ != nullptr) {
@@ -455,6 +459,7 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock) {
     if (!s.ok()) {
       return s;
     }
+    force = false;
   }
 }
 
@@ -599,49 +604,126 @@ void DBImpl::RemoveObsoleteFiles() {
   }
 }
 
-Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
-  if (batch == nullptr) {
-    return Status::InvalidArgument("WriteBatch pointer is null");
+WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
+  STRATA_DCHECK(!writers_.empty());
+  Writer* first = writers_.front();
+  WriteBatch* result = first->batch;
+  STRATA_DCHECK(result != nullptr);
+
+  size_t size = first->batch->ApproximateSize();
+
+  // Allow the group to grow up to a maximum size (1 MB), but if the
+  // leader write is small (<= 128 KB), stop at leader's size + 128 KB.
+  size_t max_size = 1 << 20;  // 1 MB
+  if (size <= (128 << 10)) {
+    max_size = size + (128 << 10);
   }
+
+  *last_writer = first;
+  auto iter = writers_.begin();
+  ++iter;  // advance past first
+  for (; iter != writers_.end(); ++iter) {
+    Writer* w = *iter;
+    if (w->sync && !first->sync) {
+      // Do not include a sync write into a batch handled by a non-sync write.
+      break;
+    }
+    if (w->batch == nullptr) {
+      // Flush forces a memtable switch as leader; do not include in group.
+      break;
+    }
+    size += w->batch->ApproximateSize();
+    if (size > max_size) {
+      break;
+    }
+    if (result == first->batch) {
+      result = &tmp_batch_;
+      STRATA_DCHECK(WriteBatchInternal::Count(result) == 0);
+      WriteBatchInternal::Append(result, first->batch);
+    }
+    WriteBatchInternal::Append(result, w->batch);
+    *last_writer = w;
+  }
+  return result;
+}
+
+Status DBImpl::Write(const WriteOptions& opts, WriteBatch* batch) {
+  if (batch != nullptr) {
+    Status s = batch->Iterate(nullptr);
+    if (!s.ok()) {
+      return s;
+    }
+    if (WriteBatchInternal::Count(batch) == 0) {
+      return Status::OK();
+    }
+  }
+
+  Writer w;
+  w.batch = batch;
+  w.sync = opts.sync;
+  w.done = false;
 
   std::unique_lock<std::mutex> lock(mutex_);
-
-  Status s = MakeRoomForWrite(&lock);
-  if (!s.ok()) {
-    return s;
+  writers_.push_back(&w);
+  while (!w.done && &w != writers_.front()) {
+    w.cv.wait(lock);
+  }
+  if (w.done) {
+    return w.status;
   }
 
-  s = batch->Iterate(nullptr);
-  if (!s.ok()) {
-    return s;
+  // I am the leader.
+  Status s = MakeRoomForWrite(&lock, /*force=*/w.batch == nullptr);
+  uint64_t last_sequence = versions_->LastSequence();
+  Writer* last_writer = &w;
+  if (s.ok() && w.batch != nullptr) {
+    WriteBatch* updates = BuildBatchGroup(&last_writer);
+    const uint32_t count = WriteBatchInternal::Count(updates);
+    if (last_sequence + count > kMaxSequenceNumber) {
+      s = Status::InvalidArgument("sequence number overflow");
+    } else {
+      WriteBatchInternal::SetSequence(updates, last_sequence + 1);
+      last_sequence += count;
+      {
+        lock.unlock();
+        s = log_->AddRecord(WriteBatchInternal::Contents(updates));
+        if (s.ok() && w.sync) {
+          s = logfile_->Sync();
+        }
+        if (s.ok()) {
+          s = WriteBatchInternal::InsertInto(updates, mem_);
+        }
+        lock.lock();
+      }
+      if (!s.ok()) {
+        bg_error_ = s;  // sticky
+        background_work_cv_.notify_all();
+      } else {
+        versions_->SetLastSequence(last_sequence);
+      }
+    }
+    if (updates == &tmp_batch_) {
+      tmp_batch_.Clear();
+    }
   }
 
-  const uint32_t count = WriteBatchInternal::Count(batch);
-  if (count == 0) {
-    return Status::OK();
+  while (true) {
+    Writer* ready = writers_.front();
+    writers_.pop_front();
+    if (ready != &w) {
+      ready->status = s;
+      ready->done = true;
+      ready->cv.notify_one();
+    }
+    if (ready == last_writer) {
+      break;
+    }
   }
 
-  const SequenceNumber seq = versions_->LastSequence() + 1;
-  if (seq + count - 1 > kMaxSequenceNumber) {
-    return Status::InvalidArgument("sequence number overflow");
+  if (!writers_.empty()) {
+    writers_.front()->cv.notify_one();
   }
 
-  WriteBatchInternal::SetSequence(batch, seq);
-
-  s = log_->AddRecord(WriteBatchInternal::Contents(batch));
-  if (s.ok() && opts.sync) {
-    s = logfile_->Sync();
-  }
-  if (!s.ok()) {
-    bg_error_ = s;  // sticky: after one failed log write, every later write returns the same error
-    background_work_cv_.notify_all();
-    return s;
-  }
-
-  s = WriteBatchInternal::InsertInto(batch, mem_);
-  STRATA_DCHECK(s.ok());
-
-  versions_->SetLastSequence(seq + count - 1);
   return s;
 }
 
@@ -760,26 +842,15 @@ std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& opts) {
 }
 
 Status DBImpl::Flush() {
+  Status s = Write(WriteOptions(), nullptr);
+  if (!s.ok()) {
+    return s;
+  }
   std::unique_lock<std::mutex> lock(mutex_);
   while (imm_ != nullptr && bg_error_.ok()) {
     background_work_cv_.wait(lock);
   }
-  if (!bg_error_.ok()) {
-    return bg_error_;
-  }
-  if (!mem_->IsEmpty()) {
-    Status s = SwitchMemTable();
-    if (!s.ok()) {
-      return s;
-    }
-    while (imm_ != nullptr && bg_error_.ok()) {
-      background_work_cv_.wait(lock);
-    }
-    if (!bg_error_.ok()) {
-      return bg_error_;
-    }
-  }
-  return Status::OK();
+  return bg_error_;
 }
 
 void DBImpl::TEST_CompactRange(int level, const std::string* begin, const std::string* end) {
@@ -829,6 +900,16 @@ std::vector<FileMetaData> DBImpl::TEST_LevelFiles(int level) {
 std::string DBImpl::TEST_CompactPointer(int level) {
   std::lock_guard<std::mutex> lock(mutex_);
   return versions_->compact_pointer(level);
+}
+
+int DBImpl::TEST_WritersCount() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return static_cast<int>(writers_.size());
+}
+
+SequenceNumber DBImpl::TEST_LastSequence() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return versions_->LastSequence();
 }
 
 Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
