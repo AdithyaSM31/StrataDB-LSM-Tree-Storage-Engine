@@ -12,6 +12,7 @@
 #include "db/version_edit.h"
 #include "log/log_writer.h"
 #include "strata/env.h"
+#include "strata/iterator.h"
 #include "strata/options.h"
 #include "strata/status.h"
 #include "util/check.h"
@@ -146,6 +147,10 @@ class VersionSet {
   void Finalize(Version* v);
   uint64_t MaxBytesForLevel(int level) const;
   void SetupOtherInputs(Compaction* c);
+  // Grows a set of L0 files until it holds every L0 file that overlaps it
+  // (by user key). L0 files overlap each other, so moving only some of the
+  // files that hold a key would put a newer version below an older one.
+  void ExpandL0Inputs(std::vector<FileMetaData*>* inputs) const;
 
   Env* const env_;
   const Options* const options_;
@@ -197,6 +202,8 @@ class Compaction {
 
   bool IsTrivialMove() const;
   void AddInputDeletions(VersionEdit* edit);
+  // REQUIRES: successive calls pass user keys in ascending order (the
+  // compaction loop does), because each level keeps a cursor.
   bool IsBaseLevelForKey(std::string_view user_key);
   bool ShouldStopBefore(std::string_view internal_key);
   void ResetOutputOverlap();
@@ -204,7 +211,6 @@ class Compaction {
  private:
   friend class VersionSet;
 
-  const Options* options_;
   int level_;
   uint64_t max_output_file_size_;
   Version* input_version_ = nullptr;
@@ -213,10 +219,20 @@ class Compaction {
   std::vector<FileMetaData*> inputs_[2];
   std::vector<FileMetaData*> grandparents_;
 
+  // Per-level cursors for IsBaseLevelForKey: files before level_ptrs_[lvl]
+  // end before the current key and never need checking again.
+  size_t level_ptrs_[kNumLevels] = {};
+
   size_t grandparent_index_ = 0;
   bool seen_key_ = false;
   uint64_t overlapped_bytes_ = 0;
 };
+
+// Returns an iterator over the entries of a sorted, non-overlapping list of
+// files (one level >= 1, or the inputs of a compaction from such a level),
+// opening each file through the table cache only when the scan reaches it.
+std::unique_ptr<Iterator> NewLevelFileIterator(const InternalKeyComparator* icmp, TableCache* cache,
+                                               std::vector<FileMetaData*> files);
 
 }  // namespace strata
 

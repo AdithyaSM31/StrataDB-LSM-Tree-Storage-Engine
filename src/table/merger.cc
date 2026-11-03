@@ -1,5 +1,6 @@
 #include "table/merger.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -14,7 +15,7 @@
 namespace strata {
 namespace {
 
-enum Direction {
+enum Direction : uint8_t {
   kForward,
   kReverse,
 };
@@ -132,12 +133,9 @@ class MergingIterator : public Iterator {
   void FindSmallest() {
     Iterator* smallest = nullptr;
     for (auto& child : children_) {
-      if (child != nullptr && child->Valid()) {
-        if (smallest == nullptr) {
-          smallest = child.get();
-        } else if (comparator_->Compare(child->key(), smallest->key()) < 0) {
-          smallest = child.get();
-        }
+      if (child != nullptr && child->Valid() &&
+          (smallest == nullptr || comparator_->Compare(child->key(), smallest->key()) < 0)) {
+        smallest = child.get();
       }
     }
     current_ = smallest;
@@ -146,12 +144,9 @@ class MergingIterator : public Iterator {
   void FindLargest() {
     Iterator* largest = nullptr;
     for (auto& child : children_) {
-      if (child != nullptr && child->Valid()) {
-        if (largest == nullptr) {
-          largest = child.get();
-        } else if (comparator_->Compare(child->key(), largest->key()) > 0) {
-          largest = child.get();
-        }
+      if (child != nullptr && child->Valid() &&
+          (largest == nullptr || comparator_->Compare(child->key(), largest->key()) > 0)) {
+        largest = child.get();
       }
     }
     current_ = largest;

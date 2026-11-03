@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -1492,9 +1494,9 @@ TEST_F(DBTest, DeleteEverythingThenCompactReclaimsSpace) {
 TEST_F(DBTest, SustainedLoadAcrossLevels) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 64 * 1024;
-  opts.max_file_size = 64 * 1024;
-  opts.max_bytes_for_level_base = 256 * 1024;
+  opts.write_buffer_size = size_t{64} * 1024;
+  opts.max_file_size = size_t{64} * 1024;
+  opts.max_bytes_for_level_base = uint64_t{256} * 1024;
   ASSERT_TRUE(Open(opts).ok());
 
   constexpr int kNumKeys = 10000;
@@ -1531,31 +1533,107 @@ TEST_F(DBTest, SustainedLoadAcrossLevels) {
 TEST_F(DBTest, UserKeyBoundarySplitNeverSplitsSameKeyAcrossFiles) {
   Options opts;
   opts.create_if_missing = true;
-  // Set small file size so files split frequently
-  opts.max_file_size = 1024;
+  opts.max_file_size = 1024;  // tiny outputs: the compaction must cut many times
   ASSERT_TRUE(Open(opts).ok());
 
-  // Write many versions of the same key
+  // A snapshot older than every write keeps all 60 versions of "hot" alive, so
+  // the compaction must write ~6 KB for that one user key.
   const Snapshot* snap = db_->GetSnapshot();
-  for (int i = 0; i < 50; ++i) {
-    ASSERT_TRUE(Put("hot_key", std::string(100, 'x')).ok());
+  for (int i = 10; i < 50; ++i) {
+    ASSERT_TRUE(Put("a" + std::to_string(i), std::string(200, 'a')).ok());
   }
-  // And a couple of other keys
-  ASSERT_TRUE(Put("a_key", "val_a").ok());
-  ASSERT_TRUE(Put("z_key", "val_z").ok());
+  for (int i = 0; i < 30; ++i) {
+    ASSERT_TRUE(Put("hot", std::string(100, 'x')).ok());
+  }
   ASSERT_TRUE(db_->Flush().ok());
+  for (int i = 0; i < 30; ++i) {
+    ASSERT_TRUE(Put("hot", std::string(100, 'y')).ok());
+  }
+  for (int i = 10; i < 50; ++i) {
+    ASSERT_TRUE(Put("z" + std::to_string(i), std::string(200, 'z')).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_EQ(dbfull()->TEST_NumLevelFiles(0), 2);
 
-  // Compact L0 down to L1
+  // Two overlapping L0 files: a real merge, not a trivial move.
+  dbfull()->TEST_CompactRange(0, nullptr, nullptr);
+  ASSERT_EQ(dbfull()->TEST_NumLevelFiles(0), 0);
+
+  const std::vector<FileMetaData> files = dbfull()->TEST_LevelFiles(1);
+  ASSERT_GE(files.size(), 3u) << "outputs were not cut by size";
+  // "hot" (~6 KB of versions) must sit whole inside one file.
+  int files_with_hot = 0;
+  for (const auto& f : files) {
+    if (ExtractUserKey(f.smallest) <= "hot" && "hot" <= ExtractUserKey(f.largest)) {
+      ++files_with_hot;
+    }
+  }
+  EXPECT_EQ(files_with_hot, 1);
+  for (size_t i = 0; i + 1 < files.size(); ++i) {
+    // Strict: no user key may straddle two files of the same level.
+    EXPECT_LT(ExtractUserKey(files[i].largest), ExtractUserKey(files[i + 1].smallest))
+        << "files " << files[i].number << " and " << files[i + 1].number;
+  }
+
+  EXPECT_EQ(Get("a10"), std::string(200, 'a'));
+  EXPECT_EQ(Get("hot"), std::string(100, 'y'));
+  EXPECT_EQ(Get("z49"), std::string(200, 'z'));
+  ReadOptions at_snapshot;
+  at_snapshot.snapshot = snap;
+  Status s;
+  Get("hot", &s, at_snapshot);
+  EXPECT_TRUE(s.IsNotFound());
+  db_->ReleaseSnapshot(snap);
+}
+
+TEST_F(DBTest, CompactRangeRewritesASingleFileInsteadOfMovingIt) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Puts and deletes in one memtable become one L0 file full of tombstones.
+  // Moving it to L1 unchanged would keep that dead data forever.
+  for (int i = 0; i < 100; ++i) {
+    ASSERT_TRUE(Put("k" + std::to_string(i), "v").ok());
+  }
+  for (int i = 0; i < 100; ++i) {
+    ASSERT_TRUE(Delete("k" + std::to_string(i)).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_EQ(dbfull()->TEST_NumLevelFiles(0), 1);
+
+  ASSERT_TRUE(db_->CompactRange("", "").ok());
+  for (int level = 0; level < kNumLevels; ++level) {
+    EXPECT_EQ(dbfull()->TEST_NumLevelFiles(level), 0) << "level " << level;
+  }
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 0);
+}
+
+TEST_F(DBTest, CompactPointerIsRecordedAndSurvivesTwoReopens) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+  EXPECT_EQ(dbfull()->TEST_CompactPointer(0), "");
+
+  ASSERT_TRUE(Put("a", "1").ok());
+  ASSERT_TRUE(Put("m", "1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_TRUE(Put("m", "2").ok());
+  ASSERT_TRUE(Put("q", "2").ok());
+  ASSERT_TRUE(db_->Flush().ok());
   dbfull()->TEST_CompactRange(0, nullptr, nullptr);
 
-  // In L1, verify that every file's largest user key is strictly less than
-  // the next file's smallest user key (STRATA_DCHECK in VersionSet checks this,
-  // but let's explicitly verify it as well).
-  EXPECT_EQ(Get("a_key"), "val_a");
-  EXPECT_EQ(Get("hot_key"), std::string(100, 'x'));
-  EXPECT_EQ(Get("z_key"), "val_z");
+  // The pointer is the largest key among the compaction's level-0 inputs.
+  const std::string pointer = dbfull()->TEST_CompactPointer(0);
+  ASSERT_FALSE(pointer.empty());
+  EXPECT_EQ(ExtractUserKey(pointer), "q");
 
-  db_->ReleaseSnapshot(snap);
+  // The first reopen replays the edit that set the pointer. The second reads
+  // only the snapshot the first one wrote into its fresh MANIFEST.
+  ASSERT_TRUE(Reopen(opts).ok());
+  EXPECT_EQ(dbfull()->TEST_CompactPointer(0), pointer);
+  ASSERT_TRUE(Reopen(opts).ok());
+  EXPECT_EQ(dbfull()->TEST_CompactPointer(0), pointer);
 }
 
 TEST_F(DBTest, IteratorAcrossMemTableAndSSTables) {
@@ -1688,6 +1766,7 @@ TEST_F(DBTest, ConcurrentCompactRange) {
   ASSERT_TRUE(db_->Flush().ok());
 
   std::vector<std::thread> compacters;
+  compacters.reserve(3);
   for (int t = 0; t < 3; ++t) {
     compacters.emplace_back([this] {
       for (int i = 0; i < 5; ++i) {
@@ -1704,6 +1783,221 @@ TEST_F(DBTest, ConcurrentCompactRange) {
   for (int i = 0; i < 50; ++i) {
     EXPECT_EQ(Get("k" + std::to_string(i)), "val" + std::to_string(i));
   }
+}
+
+bool IsTableFileName(const std::string& fname) {
+  std::string_view basename = fname;
+  const auto slash = basename.rfind('/');
+  if (slash != std::string_view::npos) {
+    basename.remove_prefix(slash + 1);
+  }
+  uint64_t number = 0;
+  FileType type;
+  return ParseFileName(basename, &number, &type) && type == FileType::kTableFile;
+}
+
+// Counts the write path's slowdown sleeps (MakeRoomForWrite is the only caller).
+class CountingSleepEnv : public EnvWrapper {
+ public:
+  explicit CountingSleepEnv(Env* target) : EnvWrapper(target) {}
+  void SleepForMicroseconds(int micros) override {
+    sleeps_.fetch_add(1);
+    EnvWrapper::SleepForMicroseconds(micros);
+  }
+  int sleeps() const { return sleeps_.load(); }
+
+ private:
+  std::atomic<int> sleeps_{0};
+};
+
+TEST_F(DBTest, WritesSlowDownAtTheL0SlowdownTrigger) {
+  auto env = std::make_unique<CountingSleepEnv>(Env::Default());
+  CountingSleepEnv* counting = env.get();
+  custom_env_ = std::move(env);
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = counting;
+  opts.l0_compaction_trigger = 100;  // nothing compacts the L0 files away
+  opts.l0_slowdown_trigger = 2;
+  opts.l0_stop_trigger = 100;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("a", "1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_TRUE(Put("b", "1").ok());  // one L0 file: below the trigger
+  ASSERT_TRUE(db_->Flush().ok());
+  ASSERT_EQ(dbfull()->TEST_NumLevelFiles(0), 2);
+  EXPECT_EQ(counting->sleeps(), 0);
+
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_TRUE(Put("c" + std::to_string(i), "1").ok());
+  }
+  EXPECT_EQ(counting->sleeps(), 5);  // exactly one 1 ms delay per write
+}
+
+TEST_F(DBTest, WritesStopAtTheL0StopTriggerUntilCompactionCatchesUp) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.l0_compaction_trigger = 100;  // only the manual compaction below drains L0
+  opts.write_buffer_size = size_t{64} * 1024;
+  opts.l0_slowdown_trigger = 100;
+  opts.l0_stop_trigger = 3;
+  ASSERT_TRUE(Open(opts).ok());
+
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_TRUE(Put("k", std::to_string(i)).ok());
+    ASSERT_TRUE(db_->Flush().ok());
+  }
+  ASSERT_EQ(dbfull()->TEST_NumLevelFiles(0), 3);
+
+  // ~100 KB of writes: the memtable fills once (64 KB), and switching it would
+  // make a fourth L0 file, so the writer must wait.
+  std::atomic<bool> writer_done{false};
+  std::thread writer([&] {
+    for (int i = 0; i < 100; ++i) {
+      EXPECT_TRUE(Put("w" + std::to_string(i), std::string(1000, 'w')).ok());
+    }
+    writer_done.store(true);
+  });
+
+  env_->SleepForMicroseconds(300 * 1000);
+  EXPECT_FALSE(writer_done.load()) << "writes did not stop at the L0 stop trigger";
+
+  dbfull()->TEST_CompactRange(0, nullptr, nullptr);  // drains L0, waking the writer
+  writer.join();
+  EXPECT_TRUE(writer_done.load());
+  EXPECT_EQ(Get("k"), "2");
+  EXPECT_EQ(Get("w99"), std::string(1000, 'w'));
+}
+
+// Holds back the first table file created after Arm() until Release(), and
+// logs when each table file is created and closed from then on.
+class GateEnv : public EnvWrapper {
+ public:
+  explicit GateEnv(Env* target) : EnvWrapper(target) {}
+
+  Status NewWritableFile(const std::string& fname, std::unique_ptr<WritableFile>* result) override {
+    if (IsTableFileName(fname)) {
+      std::unique_lock<std::mutex> lock(mu_);
+      if (armed_) {
+        events_.push_back("open " + fname);
+        if (!gate_used_) {
+          gate_used_ = true;
+          blocked_ = true;
+          cv_.notify_all();
+          cv_.wait(lock, [this] { return released_; });
+        }
+      }
+    }
+    std::unique_ptr<WritableFile> base;
+    Status s = EnvWrapper::NewWritableFile(fname, &base);
+    if (s.ok() && IsTableFileName(fname)) {
+      *result = std::make_unique<LoggedFile>(std::move(base), this, fname);
+    } else if (s.ok()) {
+      *result = std::move(base);
+    }
+    return s;
+  }
+
+  void Arm() {
+    std::lock_guard<std::mutex> lock(mu_);
+    armed_ = true;
+  }
+  void WaitUntilBlocked() {
+    std::unique_lock<std::mutex> lock(mu_);
+    cv_.wait(lock, [this] { return blocked_; });
+  }
+  void Release() {
+    std::lock_guard<std::mutex> lock(mu_);
+    released_ = true;
+    cv_.notify_all();
+  }
+  std::vector<std::string> events() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return events_;
+  }
+
+ private:
+  class LoggedFile : public WritableFileWrapper {
+   public:
+    LoggedFile(std::unique_ptr<WritableFile> target, GateEnv* env, std::string fname)
+        : WritableFileWrapper(std::move(target)), env_(env), fname_(std::move(fname)) {}
+    Status Close() override {
+      env_->Record("close " + fname_);
+      return WritableFileWrapper::Close();
+    }
+
+   private:
+    GateEnv* const env_;
+    const std::string fname_;
+  };
+
+  void Record(std::string event) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (armed_) {
+      events_.push_back(std::move(event));
+    }
+  }
+
+  std::mutex mu_;
+  std::condition_variable cv_;
+  bool armed_ = false;
+  bool gate_used_ = false;
+  bool blocked_ = false;
+  bool released_ = false;
+  std::vector<std::string> events_;
+};
+
+TEST_F(DBTest, FlushRunsWhileACompactionIsInProgress) {
+  auto env = std::make_unique<GateEnv>(Env::Default());
+  GateEnv* gate = env.get();
+  custom_env_ = std::move(env);
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = gate;
+  opts.l0_compaction_trigger = 100;  // only the manual compaction below runs
+  opts.write_buffer_size = size_t{64} * 1024;
+  ASSERT_TRUE(Open(opts).ok());
+
+  for (char round : {'a', 'b'}) {  // two overlapping L0 files
+    for (int i = 0; i < 200; ++i) {
+      ASSERT_TRUE(Put("k" + std::to_string(1000 + i), std::string(100, round)).ok());
+    }
+    ASSERT_TRUE(db_->Flush().ok());
+  }
+
+  // The compaction stops while creating its output file.
+  gate->Arm();
+  std::thread compactor([&] { dbfull()->TEST_CompactRange(0, nullptr, nullptr); });
+  gate->WaitUntilBlocked();
+
+  // Meanwhile 60 writes of 1 KB fill the 64 KB memtable exactly once, making
+  // an imm_ that only the (busy) background thread can flush. Keep the count
+  // well below 90: around there the memtable fills a second time, and that
+  // write would wait for the flush the paused compaction is holding up.
+  for (int i = 0; i < 60; ++i) {
+    ASSERT_TRUE(Put("m" + std::to_string(i), std::string(1000, 'm')).ok());
+  }
+  gate->Release();
+  compactor.join();
+
+  // events[0] opens the compaction's output. The flush must create and finish
+  // its own table before the compaction closes that output.
+  const std::vector<std::string> events = gate->events();
+  ASSERT_GE(events.size(), 2u);
+  ASSERT_EQ(events[0].rfind("open ", 0), 0u);
+  const std::string compaction_output = events[0].substr(5);
+  const auto output_closed = std::find(events.begin(), events.end(), "close " + compaction_output);
+  const auto flush_opened =
+      std::find_if(events.begin() + 1, events.end(),
+                   [](const std::string& e) { return e.rfind("open ", 0) == 0; });
+  ASSERT_NE(output_closed, events.end());
+  ASSERT_NE(flush_opened, events.end());
+  EXPECT_LT(flush_opened - events.begin(), output_closed - events.begin())
+      << "the memtable was flushed only after the compaction finished";
+
+  EXPECT_EQ(Get("k1000"), std::string(100, 'b'));
+  EXPECT_EQ(Get("m59"), std::string(1000, 'm'));
 }
 
 }  // namespace

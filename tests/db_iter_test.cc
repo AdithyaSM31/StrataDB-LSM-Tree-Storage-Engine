@@ -32,7 +32,7 @@ class VectorInternalIterator : public Iterator {
 
   bool Valid() const override { return index_ < entries_.size(); }
 
-  void SeekToFirst() override { index_ = entries_.empty() ? 0 : 0; }
+  void SeekToFirst() override { index_ = 0; }
 
   void SeekToLast() override { index_ = entries_.empty() ? 0 : entries_.size() - 1; }
 
@@ -70,7 +70,7 @@ class VectorInternalIterator : public Iterator {
 
   Status status() const override { return status_; }
 
-  void SetStatus(Status s) { status_ = s; }
+  void SetStatus(Status s) { status_ = std::move(s); }
 
  private:
   std::vector<std::pair<std::string, std::string>> entries_;

@@ -36,7 +36,7 @@ class DBIter : public Iterator {
   void RegisterCleanup(std::function<void()> cleanup);
 
  private:
-  enum Direction {
+  enum Direction : uint8_t {
     kForward,
     kReverse,
   };

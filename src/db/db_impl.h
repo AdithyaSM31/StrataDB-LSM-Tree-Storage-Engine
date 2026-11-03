@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "db/dbformat.h"
 #include "db/table_cache.h"
@@ -99,6 +100,10 @@ class DBImpl : public DB {
   // Test helpers
   void TEST_CompactRange(int level, const std::string* begin, const std::string* end);
   int TEST_NumLevelFiles(int level);
+  // Copies of the current version's file metadata for one level.
+  std::vector<FileMetaData> TEST_LevelFiles(int level);
+  // The round-robin compaction pointer for a level ("" if never set).
+  std::string TEST_CompactPointer(int level);
 
  private:
   Status NewDB();
@@ -118,6 +123,7 @@ class DBImpl : public DB {
     const std::string* end = nullptr;
   };
 
+  SequenceNumber SmallestSnapshot() const;  // REQUIRES: mutex_ held
   Status DoCompactionWork(CompactionState* compact, std::unique_lock<std::mutex>* lock);
   Status OpenCompactionOutputFile(CompactionState* compact);
   Status FinishCompactionOutputFile(CompactionState* compact);

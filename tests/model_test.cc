@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -36,9 +37,9 @@ class ModelTest : public ::testing::Test {
     ASSERT_FALSE(ec) << ec.message();
 
     options_.create_if_missing = true;
-    options_.write_buffer_size = 64 * 1024;  // 64 KB
-    options_.max_file_size = 64 * 1024;      // 64 KB
-    options_.l0_compaction_trigger = 2;      // aggressive compaction
+    options_.write_buffer_size = size_t{64} * 1024;  // 64 KB
+    options_.max_file_size = size_t{64} * 1024;      // 64 KB
+    options_.l0_compaction_trigger = 2;              // aggressive compaction
     ASSERT_TRUE(DB::Open(options_, test_dir_, &db_).ok());
   }
 
@@ -275,7 +276,7 @@ TEST_F(ModelTest, BidirectionalIterationFuzzing) {
 
   // Random walk
   for (int step = 0; step < 500; ++step) {
-    int action = rnd.Uniform(5);
+    const int action = static_cast<int>(rnd.Uniform(5));
     if (action == 0) {
       // SeekToFirst
       iter->SeekToFirst();
@@ -322,7 +323,7 @@ TEST_F(ModelTest, BidirectionalIterationFuzzing) {
       }
     } else {
       // Random Seek
-      int target_num = rnd.Uniform(kNumKeys * 2 + 10);
+      const int target_num = static_cast<int>(rnd.Uniform(kNumKeys * 2 + 10));
       std::string target = FormatKey(target_num);
       iter->Seek(target);
       auto it = current_model_.lower_bound(target);
@@ -388,7 +389,7 @@ TEST_F(ModelTest, RandomizedOperationsWithOracle) {
   std::vector<const Snapshot*> active_snapshots;
 
   for (int op = 0; op < kTotalOps; ++op) {
-    int choice = rnd.Uniform(100);
+    const int choice = static_cast<int>(rnd.Uniform(100));
 
     if (choice < 45) {
       // Put (45%)
@@ -426,7 +427,7 @@ TEST_F(ModelTest, RandomizedOperationsWithOracle) {
       } else if (!active_snapshots.empty()) {
         size_t idx = rnd.Uniform(static_cast<uint32_t>(active_snapshots.size()));
         ReleaseSnapshot(active_snapshots[idx]);
-        active_snapshots.erase(active_snapshots.begin() + idx);
+        active_snapshots.erase(active_snapshots.begin() + static_cast<std::ptrdiff_t>(idx));
       }
     } else if (choice < 95) {
       // Flush (3%)
@@ -438,7 +439,9 @@ TEST_F(ModelTest, RandomizedOperationsWithOracle) {
       } else {
         uint32_t k1 = rnd.Uniform(kKeyUniverse);
         uint32_t k2 = rnd.Uniform(kKeyUniverse);
-        if (k1 > k2) std::swap(k1, k2);
+        if (k1 > k2) {
+          std::swap(k1, k2);
+        }
         CompactRange(FormatKey(k1), FormatKey(k2));
       }
     } else {

@@ -17,9 +17,12 @@
 #include "log/log_reader.h"
 #include "log/log_writer.h"
 #include "strata/env.h"
+#include "strata/iterator.h"
 #include "strata/options.h"
 #include "strata/status.h"
+#include "table/two_level_iterator.h"
 #include "util/check.h"
+#include "util/coding.h"
 
 namespace strata {
 
@@ -652,16 +655,7 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
     std::vector<FileMetaData*> expanded0;
     GetOverlappingInputs(level, &all_start, &all_limit, &expanded0);
     if (level == 0) {
-      while (true) {
-        std::string s_uk, l_uk;
-        GetRange(expanded0, &s_uk, &l_uk);
-        std::vector<FileMetaData*> more;
-        GetOverlappingInputs(0, &s_uk, &l_uk, &more);
-        if (more.size() <= expanded0.size()) {
-          break;
-        }
-        expanded0 = std::move(more);
-      }
+      ExpandL0Inputs(&expanded0);
     }
     if (expanded0.size() > c->inputs_[0].size()) {
       std::string new_start, new_limit;
@@ -670,8 +664,12 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
       GetOverlappingInputs(level + 1, &new_start, &new_limit, &expanded1);
       if (expanded1.size() == c->inputs_[1].size()) {
         uint64_t total_bytes = 0;
-        for (const auto* f : expanded0) total_bytes += f->file_size;
-        for (const auto* f : expanded1) total_bytes += f->file_size;
+        for (const auto* f : expanded0) {
+          total_bytes += f->file_size;
+        }
+        for (const auto* f : expanded1) {
+          total_bytes += f->file_size;
+        }
         if (total_bytes <= 25 * options_->max_file_size) {
           c->inputs_[0] = std::move(expanded0);
           c->inputs_[1] = std::move(expanded1);
@@ -683,6 +681,21 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
 
   if (level + 2 < kNumLevels) {
     GetOverlappingInputs(level + 2, &all_start, &all_limit, &c->grandparents_);
+  }
+}
+
+void VersionSet::ExpandL0Inputs(std::vector<FileMetaData*>* inputs) const {
+  // Each pass widens the user-key range to cover every file found so far; stop
+  // when a pass finds no new file.
+  while (!inputs->empty()) {
+    std::string smallest_uk, largest_uk;
+    GetRange(*inputs, &smallest_uk, &largest_uk);
+    std::vector<FileMetaData*> overlapping;
+    GetOverlappingInputs(0, &smallest_uk, &largest_uk, &overlapping);
+    if (overlapping.size() <= inputs->size()) {
+      return;
+    }
+    *inputs = std::move(overlapping);
   }
 }
 
@@ -712,16 +725,7 @@ std::unique_ptr<Compaction> VersionSet::PickCompaction() {
   c->inputs_[0].push_back(picked);
 
   if (level == 0) {
-    while (true) {
-      std::string smallest_uk, largest_uk;
-      GetRange(c->inputs_[0], &smallest_uk, &largest_uk);
-      std::vector<FileMetaData*> overlapping;
-      GetOverlappingInputs(0, &smallest_uk, &largest_uk, &overlapping);
-      if (overlapping.size() <= c->inputs_[0].size()) {
-        break;
-      }
-      c->inputs_[0] = std::move(overlapping);
-    }
+    ExpandL0Inputs(&c->inputs_[0]);
   }
 
   SetupOtherInputs(c.get());
@@ -743,16 +747,7 @@ std::unique_ptr<Compaction> VersionSet::CompactRange(int level, const std::strin
   c->inputs_[0] = std::move(inputs0);
 
   if (level == 0) {
-    while (true) {
-      std::string smallest_uk, largest_uk;
-      GetRange(c->inputs_[0], &smallest_uk, &largest_uk);
-      std::vector<FileMetaData*> overlapping;
-      GetOverlappingInputs(0, &smallest_uk, &largest_uk, &overlapping);
-      if (overlapping.size() <= c->inputs_[0].size()) {
-        break;
-      }
-      c->inputs_[0] = std::move(overlapping);
-    }
+    ExpandL0Inputs(&c->inputs_[0]);
   }
 
   SetupOtherInputs(c.get());
@@ -760,7 +755,7 @@ std::unique_ptr<Compaction> VersionSet::CompactRange(int level, const std::strin
 }
 
 Compaction::Compaction(const Options* options, int level)
-    : options_(options), level_(level), max_output_file_size_(options->max_file_size) {}
+    : level_(level), max_output_file_size_(options->max_file_size) {}
 
 Compaction::~Compaction() {
   if (input_version_ != nullptr) {
@@ -811,13 +806,16 @@ bool Compaction::IsBaseLevelForKey(std::string_view user_key) {
   }
   for (int lvl = level_ + 2; lvl < kNumLevels; ++lvl) {
     const auto& files = input_version_->files(lvl);
-    for (const FileMetaData* f : files) {
+    while (level_ptrs_[lvl] < files.size()) {
+      const FileMetaData* f = files[level_ptrs_[lvl]];
       if (user_key.compare(ExtractUserKey(f->largest)) <= 0) {
         if (user_key.compare(ExtractUserKey(f->smallest)) >= 0) {
-          return false;
+          return false;  // this deeper file may hold an older version of the key
         }
-        break;
+        break;  // the key falls in a gap before this file
       }
+      // This file ends before user_key, so it ends before every later key too.
+      ++level_ptrs_[lvl];
     }
   }
   return true;
@@ -846,6 +844,76 @@ bool Compaction::ShouldStopBefore(std::string_view internal_key) {
 void Compaction::ResetOutputOverlap() {
   seen_key_ = false;
   overlapped_bytes_ = 0;
+}
+
+namespace {
+
+// Index over a sorted list of non-overlapping files: the key of each entry is
+// the file's largest internal key and the value encodes (number, file_size).
+class LevelFileIndexIterator : public Iterator {
+ public:
+  LevelFileIndexIterator(const InternalKeyComparator* icmp, std::vector<FileMetaData*> files)
+      : icmp_(icmp), files_(std::move(files)), index_(files_.size()) {}
+
+  bool Valid() const override { return index_ < files_.size(); }
+  void SeekToFirst() override { index_ = 0; }
+  void SeekToLast() override { index_ = files_.empty() ? 0 : files_.size() - 1; }
+
+  // First file whose largest key is >= target.
+  void Seek(std::string_view target) override {
+    auto it = std::lower_bound(files_.begin(), files_.end(), target,
+                               [this](const FileMetaData* f, std::string_view t) {
+                                 return icmp_->Compare(f->largest, t) < 0;
+                               });
+    index_ = static_cast<size_t>(it - files_.begin());
+  }
+
+  void Next() override {
+    STRATA_DCHECK(Valid());
+    ++index_;
+  }
+
+  void Prev() override {
+    STRATA_DCHECK(Valid());
+    index_ = (index_ == 0) ? files_.size() : index_ - 1;  // files_.size() marks invalid
+  }
+
+  std::string_view key() const override {
+    STRATA_DCHECK(Valid());
+    return files_[index_]->largest;
+  }
+
+  std::string_view value() const override {
+    STRATA_DCHECK(Valid());
+    value_buf_.clear();
+    PutVarint64(&value_buf_, files_[index_]->number);
+    PutVarint64(&value_buf_, files_[index_]->file_size);
+    return value_buf_;
+  }
+
+  Status status() const override { return Status::OK(); }
+
+ private:
+  const InternalKeyComparator* const icmp_;
+  const std::vector<FileMetaData*> files_;
+  size_t index_;
+  mutable std::string value_buf_;
+};
+
+}  // namespace
+
+std::unique_ptr<Iterator> NewLevelFileIterator(const InternalKeyComparator* icmp, TableCache* cache,
+                                               std::vector<FileMetaData*> files) {
+  auto index_iter = std::make_unique<LevelFileIndexIterator>(icmp, std::move(files));
+  auto open_file = [cache](std::string_view handle) -> std::unique_ptr<Iterator> {
+    uint64_t number = 0;
+    uint64_t file_size = 0;
+    if (!GetVarint64(&handle, &number) || !GetVarint64(&handle, &file_size)) {
+      return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
+    }
+    return cache->NewIterator(number, file_size);
+  };
+  return NewTwoLevelIterator(std::move(index_iter), std::move(open_file));
 }
 
 }  // namespace strata

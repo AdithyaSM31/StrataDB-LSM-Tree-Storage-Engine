@@ -26,9 +26,7 @@
 #include "strata/status.h"
 #include "table/merger.h"
 #include "table/table_builder.h"
-#include "table/two_level_iterator.h"
 #include "util/check.h"
-#include "util/coding.h"
 
 namespace strata {
 
@@ -60,68 +58,15 @@ Options SanitizeOptions(const Options& src) {
   return result;
 }
 
-class LevelFileIndexIterator : public Iterator {
- public:
-  LevelFileIndexIterator(const InternalKeyComparator* icmp, std::vector<FileMetaData*> files)
-      : icmp_(icmp), files_(std::move(files)), index_(files_.size()) {}
-
-  ~LevelFileIndexIterator() override = default;
-
-  bool Valid() const override { return index_ < files_.size(); }
-
-  void SeekToFirst() override { index_ = files_.empty() ? 0 : 0; }
-
-  void SeekToLast() override { index_ = files_.empty() ? 0 : files_.size() - 1; }
-
-  void Seek(std::string_view target) override {
-    auto it = std::lower_bound(files_.begin(), files_.end(), target,
-                               [this](const FileMetaData* f, std::string_view t) {
-                                 return icmp_->Compare(f->largest, t) < 0;
-                               });
-    index_ = static_cast<size_t>(it - files_.begin());
-  }
-
-  void Next() override {
-    STRATA_DCHECK(Valid());
-    ++index_;
-  }
-
-  void Prev() override {
-    STRATA_DCHECK(Valid());
-    if (index_ == 0) {
-      index_ = files_.size();
-    } else {
-      --index_;
-    }
-  }
-
-  std::string_view key() const override {
-    STRATA_DCHECK(Valid());
-    return files_[index_]->largest;
-  }
-
-  std::string_view value() const override {
-    STRATA_DCHECK(Valid());
-    value_buf_.clear();
-    PutVarint64(&value_buf_, files_[index_]->number);
-    PutVarint64(&value_buf_, files_[index_]->file_size);
-    return value_buf_;
-  }
-
-  Status status() const override { return Status::OK(); }
-
- private:
-  const InternalKeyComparator* icmp_;
-  const std::vector<FileMetaData*> files_;
-  size_t index_;
-  mutable std::string value_buf_;
-};
-
 }  // namespace
 
 struct DBImpl::CompactionState {
   Compaction* const compaction;
-  SequenceNumber smallest_snapshot;
+  // Entries hidden from every snapshot at or above this sequence may be dropped.
+  const SequenceNumber smallest_snapshot;
+  // A manual compaction (CompactRange) always rewrites its inputs: a trivial
+  // move would carry tombstones and overwritten values down unchanged.
+  const bool is_manual;
 
   struct Output {
     uint64_t number = 0;
@@ -135,7 +80,8 @@ struct DBImpl::CompactionState {
   std::unique_ptr<TableBuilder> builder;
   uint64_t total_bytes = 0;
 
-  CompactionState(Compaction* c, SequenceNumber snap) : compaction(c), smallest_snapshot(snap) {}
+  CompactionState(Compaction* c, SequenceNumber snap, bool manual)
+      : compaction(c), smallest_snapshot(snap), is_manual(manual) {}
 
   Output* current_output() {
     STRATA_DCHECK(!outputs.empty());
@@ -518,6 +464,10 @@ bool DBImpl::HasBackgroundWork() const {
           (imm_ != nullptr || manual_compaction_ != nullptr || versions_->NeedsCompaction()));
 }
 
+SequenceNumber DBImpl::SmallestSnapshot() const {
+  return snapshots_.empty() ? versions_->LastSequence() : snapshots_.oldest()->sequence_number();
+}
+
 void DBImpl::BackgroundThreadMain() {
   std::unique_lock<std::mutex> lock(mutex_);
   while (true) {
@@ -543,11 +493,9 @@ void DBImpl::BackgroundThreadMain() {
       if (c == nullptr) {
         m->done = true;
       } else {
-        CompactionState compact(c.get(), snapshots_.empty()
-                                             ? versions_->LastSequence()
-                                             : snapshots_.oldest()->sequence_number());
-        Status s = DoCompactionWork(&compact, &lock);
-        (void)s;
+        CompactionState compact(c.get(), SmallestSnapshot(), /*manual=*/true);
+        // A failure is recorded in bg_error_, which CompactRange returns.
+        (void)DoCompactionWork(&compact, &lock);
         m->done = true;
       }
       manual_compaction_ = nullptr;
@@ -559,11 +507,8 @@ void DBImpl::BackgroundThreadMain() {
     if (versions_->NeedsCompaction()) {
       std::unique_ptr<Compaction> c = versions_->PickCompaction();
       if (c != nullptr) {
-        CompactionState compact(c.get(), snapshots_.empty()
-                                             ? versions_->LastSequence()
-                                             : snapshots_.oldest()->sequence_number());
-        Status s = DoCompactionWork(&compact, &lock);
-        (void)s;
+        CompactionState compact(c.get(), SmallestSnapshot(), /*manual=*/false);
+        (void)DoCompactionWork(&compact, &lock);  // failures go to bg_error_
       }
       background_work_cv_.notify_all();
       continue;
@@ -796,17 +741,7 @@ std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& opts) {
 
     for (int level = 1; level < kNumLevels; ++level) {
       if (!current->files(level).empty()) {
-        auto index_iter = std::make_unique<LevelFileIndexIterator>(&icmp_, current->files(level));
-        auto block_fn = [this](std::string_view handle) -> std::unique_ptr<Iterator> {
-          uint64_t number = 0;
-          uint64_t file_size = 0;
-          std::string_view in = handle;
-          if (!GetVarint64(&in, &number) || !GetVarint64(&in, &file_size)) {
-            return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
-          }
-          return table_cache_->NewIterator(number, file_size);
-        };
-        list.push_back(NewTwoLevelIterator(std::move(index_iter), std::move(block_fn)));
+        list.push_back(NewLevelFileIterator(&icmp_, table_cache_.get(), current->files(level)));
       }
     }
   }
@@ -882,6 +817,20 @@ int DBImpl::TEST_NumLevelFiles(int level) {
   return versions_->NumLevelFiles(level);
 }
 
+std::vector<FileMetaData> DBImpl::TEST_LevelFiles(int level) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<FileMetaData> result;
+  for (const FileMetaData* f : versions_->current()->files(level)) {
+    result.push_back(*f);
+  }
+  return result;
+}
+
+std::string DBImpl::TEST_CompactPointer(int level) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return versions_->compact_pointer(level);
+}
+
 Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
   int max_level_with_files = 1;
   std::string begin_str(begin);
@@ -914,42 +863,17 @@ Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
 
 std::unique_ptr<Iterator> DBImpl::MakeInputIterator(Compaction* c) {
   std::vector<std::unique_ptr<Iterator>> children;
-
   if (c->level() == 0) {
-    for (size_t i = 0; i < c->num_input_files(0); ++i) {
-      children.push_back(
-          table_cache_->NewIterator(c->input(0, i)->number, c->input(0, i)->file_size));
+    // L0 files overlap each other: each one needs its own iterator.
+    for (const FileMetaData* f : c->inputs(0)) {
+      children.push_back(table_cache_->NewIterator(f->number, f->file_size));
     }
-  } else {
-    if (c->num_input_files(0) > 0) {
-      auto index_iter = std::make_unique<LevelFileIndexIterator>(&icmp_, c->inputs(0));
-      auto block_fn = [this](std::string_view handle) -> std::unique_ptr<Iterator> {
-        uint64_t number = 0;
-        uint64_t file_size = 0;
-        std::string_view in = handle;
-        if (!GetVarint64(&in, &number) || !GetVarint64(&in, &file_size)) {
-          return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
-        }
-        return table_cache_->NewIterator(number, file_size);
-      };
-      children.push_back(NewTwoLevelIterator(std::move(index_iter), std::move(block_fn)));
-    }
+  } else if (c->num_input_files(0) > 0) {
+    children.push_back(NewLevelFileIterator(&icmp_, table_cache_.get(), c->inputs(0)));
   }
-
   if (c->num_input_files(1) > 0) {
-    auto index_iter = std::make_unique<LevelFileIndexIterator>(&icmp_, c->inputs(1));
-    auto block_fn = [this](std::string_view handle) -> std::unique_ptr<Iterator> {
-      uint64_t number = 0;
-      uint64_t file_size = 0;
-      std::string_view in = handle;
-      if (!GetVarint64(&in, &number) || !GetVarint64(&in, &file_size)) {
-        return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
-      }
-      return table_cache_->NewIterator(number, file_size);
-    };
-    children.push_back(NewTwoLevelIterator(std::move(index_iter), std::move(block_fn)));
+    children.push_back(NewLevelFileIterator(&icmp_, table_cache_.get(), c->inputs(1)));
   }
-
   return NewMergingIterator(&icmp_, std::move(children));
 }
 
@@ -1050,7 +974,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
 }
 
 Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::mutex>* lock) {
-  if (compact->compaction->IsTrivialMove()) {
+  if (!compact->is_manual && compact->compaction->IsTrivialMove()) {
     STRATA_DCHECK(compact->compaction->num_input_files(0) == 1);
     FileMetaData* f = compact->compaction->input(0, 0);
     VersionEdit edit;
@@ -1091,7 +1015,10 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
 
     std::string_view key = input->key();
     ParsedInternalKey ikey;
+    bool drop = false;
     if (!ParseInternalKey(key, &ikey)) {
+      // Keep a key we cannot parse: dropping it would hide the corruption,
+      // while keeping it lets a later read or check report it.
       current_user_key.clear();
       has_current_user_key = false;
       last_sequence_for_key = kMaxSequenceNumber;
@@ -1101,44 +1028,43 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
         has_current_user_key = true;
         last_sequence_for_key = kMaxSequenceNumber;
       }
-
-      bool drop = false;
-      if (last_sequence_for_key <= compact->smallest_snapshot) {
-        drop = true;
-      } else if (ikey.type == kTypeDeletion && ikey.sequence <= compact->smallest_snapshot &&
-                 compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
-        drop = true;
-      }
-
+      // Rule A: a newer version of this key is already visible to every
+      // snapshot, so this one can never be read.
+      // Rule B: a tombstone no snapshot needs, with no older data below the
+      // output level that it would still have to hide.
+      drop = last_sequence_for_key <= compact->smallest_snapshot ||
+             (ikey.type == kTypeDeletion && ikey.sequence <= compact->smallest_snapshot &&
+              compact->compaction->IsBaseLevelForKey(ikey.user_key));
       last_sequence_for_key = ikey.sequence;
+    }
 
-      if (!drop) {
-        if (compact->builder == nullptr) {
-          status = OpenCompactionOutputFile(compact);
-          if (!status.ok()) {
-            break;
-          }
+    if (!drop) {
+      if (compact->builder == nullptr) {
+        status = OpenCompactionOutputFile(compact);
+        if (!status.ok()) {
+          break;
         }
-        if (compact->builder->NumEntries() == 0) {
-          compact->current_output()->smallest = std::string(key);
-        }
-        compact->current_output()->largest = std::string(key);
-        compact->builder->Add(key, input->value());
       }
+      if (compact->builder->NumEntries() == 0) {
+        compact->current_output()->smallest = std::string(key);
+      }
+      compact->current_output()->largest = std::string(key);
+      compact->builder->Add(key, input->value());
     }
 
     input->Next();
 
+    // Cut an output file only between two different user keys: every version
+    // of a key must stay in one file, or L1+ files would overlap.
     if (compact->builder != nullptr && input->Valid()) {
       ParsedInternalKey next_ikey;
-      if (ParseInternalKey(input->key(), &next_ikey)) {
-        if (next_ikey.user_key != current_user_key) {
-          if (compact->builder->FileSize() >= compact->compaction->max_output_file_size() ||
-              compact->compaction->ShouldStopBefore(input->key())) {
-            status = FinishCompactionOutputFile(compact);
-            if (!status.ok()) {
-              break;
-            }
+      if (ParseInternalKey(input->key(), &next_ikey) &&
+          (!has_current_user_key || next_ikey.user_key != current_user_key)) {
+        if (compact->builder->FileSize() >= compact->compaction->max_output_file_size() ||
+            compact->compaction->ShouldStopBefore(input->key())) {
+          status = FinishCompactionOutputFile(compact);
+          if (!status.ok()) {
+            break;
           }
         }
       }
@@ -1162,10 +1088,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
 
   lock->lock();
 
-  for (const auto& out : compact->outputs) {
-    pending_outputs_.erase(out.number);
-  }
-
   if (status.ok() && shutting_down_.load(std::memory_order_acquire)) {
     status = Status::IOError("compaction aborted by shutdown");
   }
@@ -1185,6 +1107,11 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
     }
   }
 
+  // Only now, with the outputs either installed in the current version or
+  // removed, may RemoveObsoleteFiles see them.
+  for (const auto& out : compact->outputs) {
+    pending_outputs_.erase(out.number);
+  }
   RemoveObsoleteFiles();
   return status;
 }

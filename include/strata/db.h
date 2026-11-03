@@ -83,7 +83,11 @@ class DB {
   // Force a flush of the current memtable to an L0 SSTable.
   virtual Status Flush() = 0;
 
-  // Compact the underlying storage for the key range [*begin, *end].
+  // Compact the underlying storage for the user-key range [begin, end], pushing
+  // it down to the deepest level that holds data in that range. Overwritten
+  // values and deleted keys that no snapshot needs are dropped. An empty begin
+  // means "from the first key" and an empty end means "to the last key", so
+  // CompactRange("", "") compacts the whole database.
   virtual Status CompactRange(std::string_view begin, std::string_view end) = 0;
 
   // DB implementations can export properties about their state
