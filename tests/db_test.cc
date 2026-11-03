@@ -1361,7 +1361,9 @@ TEST_F(DBTest, MaxOpenFilesIsClamped) {
   opts.max_open_files = 10;
   ASSERT_TRUE(Open(opts).ok());
   auto* impl = static_cast<DBImpl*>(db_.get());
+  EXPECT_EQ(impl->TEST_options().max_open_files, 64);
   // Clamped to at least 64. TableCache capacity is clamped to 64 - 10 = 54.
+  // Across 16 shards (each with ceil(54/16) = 4), total charge is bounded by 64.
   for (int i = 0; i < 70; ++i) {
     ASSERT_TRUE(Put("k" + std::to_string(i), "v").ok());
     ASSERT_TRUE(db_->Flush().ok());
@@ -1369,7 +1371,14 @@ TEST_F(DBTest, MaxOpenFilesIsClamped) {
   for (int i = 0; i < 70; ++i) {
     EXPECT_EQ(Get("k" + std::to_string(i)), "v");
   }
-  EXPECT_LE(impl->table_cache()->TotalCharge(), 54u);
+  EXPECT_LE(impl->table_cache()->TotalCharge(), 64u);
+
+  // Upper clamp: max_open_files > 50000 is clamped to 50000.
+  Close();
+  opts.max_open_files = 100000;
+  ASSERT_TRUE(Open(opts).ok());
+  auto* impl2 = static_cast<DBImpl*>(db_.get());
+  EXPECT_EQ(impl2->TEST_options().max_open_files, 50000);
 }
 
 // ---------------------------------------------------------------------------
@@ -3039,6 +3048,48 @@ TEST_F(DBTest, CompactionDoesntTouchTheCache) {
 
   // Cache inserts count must remain identical
   EXPECT_EQ(impl->block_cache()->inserts(), inserts_before);
+}
+
+TEST_F(DBTest, BlockCacheCapacitySmallerThanBlockSize) {
+  Options options;
+  options.create_if_missing = true;
+  // Block cache capacity 100 bytes is much smaller than a single ~4 KB data block
+  options.block_cache_capacity = 100;
+  ASSERT_TRUE(Open(options).ok());
+
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(Put("key_" + std::to_string(i), std::string(200, 'x')).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  auto* impl = static_cast<DBImpl*>(db_.get());
+  ASSERT_NE(impl->block_cache(), nullptr);
+
+  // Read keys. Since each block is ~4KB, which is > 100 bytes capacity (and > per-shard capacity),
+  // blocks cannot fit in any shard. Reading must succeed correctly without caching.
+  for (int i = 0; i < 50; ++i) {
+    EXPECT_EQ(Get("key_" + std::to_string(i)), std::string(200, 'x'));
+  }
+  EXPECT_EQ(impl->block_cache()->TotalCharge(), 0u);
+}
+
+TEST_F(DBTest, BlockCacheCapacityZero) {
+  Options options;
+  options.create_if_missing = true;
+  options.block_cache_capacity = 0;  // Caching disabled
+  ASSERT_TRUE(Open(options).ok());
+
+  auto* impl = static_cast<DBImpl*>(db_.get());
+  EXPECT_EQ(impl->block_cache(), nullptr);
+
+  for (int i = 0; i < 20; ++i) {
+    ASSERT_TRUE(Put("k_" + std::to_string(i), "v_" + std::to_string(i)).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_EQ(Get("k_" + std::to_string(i)), "v_" + std::to_string(i));
+  }
 }
 
 }  // namespace

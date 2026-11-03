@@ -111,6 +111,7 @@ class DBImpl : public DB {
   void TEST_SetLastSequence(SequenceNumber seq);
   BlockCache* block_cache() const { return block_cache_.get(); }
   TableCache* table_cache() const { return table_cache_.get(); }
+  const Options& TEST_options() const { return options_; }
 
  private:
   struct Writer {

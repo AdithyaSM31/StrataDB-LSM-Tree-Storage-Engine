@@ -85,9 +85,10 @@ class LRUCache {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = index_.find(key);
     if (it != index_.end()) {
-      usage_ -= it->second->charge;
-      lru_.erase(it->second);
+      auto lru_it = it->second;
+      usage_ -= lru_it->charge;
       index_.erase(it);
+      lru_.erase(lru_it);
     }
   }
 

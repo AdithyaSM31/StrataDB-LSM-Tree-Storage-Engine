@@ -130,6 +130,12 @@ TEST_F(TableCacheTest, MissingFileReturnsError) {
   EXPECT_EQ(t, nullptr);
 }
 
+TEST_F(TableCacheTest, NullTablePointerReturnsInvalidArgument) {
+  TableCache cache(test_dir_, options_, &icmp_);
+  Status s = cache.FindTable(10, 100, nullptr);
+  EXPECT_TRUE(s.IsInvalidArgument());
+}
+
 TEST_F(TableCacheTest, EraseWorksDirectly) {
   const uint64_t file_num = 30;
   uint64_t file_size = BuildTestTable(file_num, "key30", "val30");
@@ -202,6 +208,45 @@ TEST_F(TableCacheTest, IteratorKeepsEvictedTableValid) {
   ASSERT_TRUE(iter->Valid());
   EXPECT_EQ(ExtractUserKey(iter->key()), "target_key");
   EXPECT_EQ(iter->value(), "target_val");
+}
+
+TEST_F(TableCacheTest, MultiplePinnedIteratorsExceedCapacity) {
+  Options opts = options_;
+  opts.max_open_files = 26;  // capacity = 16
+  TableCache cache(test_dir_, opts, &icmp_);
+
+  constexpr int kNumTables = 25;
+  std::vector<uint64_t> file_nums;
+  std::vector<uint64_t> file_sizes;
+  for (int i = 0; i < kNumTables; ++i) {
+    uint64_t num = 700 + static_cast<uint64_t>(i);
+    uint64_t sz = BuildTestTable(num, "k" + std::to_string(i), "v" + std::to_string(i));
+    file_nums.push_back(num);
+    file_sizes.push_back(sz);
+  }
+
+  // Open 25 simultaneous iterators (exceeding table cache capacity 16)
+  std::vector<std::unique_ptr<Iterator>> iters;
+  for (int i = 0; i < kNumTables; ++i) {
+    auto iter = cache.NewIterator(file_nums[i], file_sizes[i]);
+    ASSERT_TRUE(iter->status().ok());
+    iters.push_back(std::move(iter));
+  }
+
+  // All 25 iterators remain fully functional
+  for (int i = 0; i < kNumTables; ++i) {
+    iters[i]->SeekToFirst();
+    ASSERT_TRUE(iters[i]->Valid());
+    EXPECT_EQ(ExtractUserKey(iters[i]->key()), "k" + std::to_string(i));
+    EXPECT_EQ(iters[i]->value(), "v" + std::to_string(i));
+  }
+
+  // Cache usage is bounded by 16
+  EXPECT_LE(cache.TotalCharge(), 16u);
+
+  // Release all pinned iterators
+  iters.clear();
+  EXPECT_LE(cache.TotalCharge(), 16u);
 }
 
 }  // namespace

@@ -293,5 +293,45 @@ TEST(ShardedLRUCacheTest, Concurrency) {
   EXPECT_GT(cache.inserts(), 0u);
 }
 
+TEST(ShardedLRUCacheTest, EdgeCasesAndDeduplication) {
+  // 1. Capacity 0
+  {
+    ShardedLRUCache<std::string> cache(0);
+    auto val = std::make_shared<std::string>("val0");
+    auto res = cache.Insert("key0", val, 10);
+    EXPECT_EQ(res, val);
+    EXPECT_EQ(cache.Lookup("key0"), nullptr);
+    EXPECT_EQ(cache.TotalCharge(), 0u);
+  }
+
+  // 2. Oversized entry
+  {
+    // Sharded cache with capacity 32 => 2 per shard
+    ShardedLRUCache<std::string> cache(32);
+    auto big = std::make_shared<std::string>("big");
+    auto res = cache.Insert("huge_entry", big, 5);  // charge 5 > per-shard cap 2
+    EXPECT_EQ(res, big);
+    EXPECT_EQ(cache.Lookup("huge_entry"), nullptr);
+    EXPECT_EQ(cache.TotalCharge(), 0u);
+  }
+
+  // 3. Duplicate insert ("first one wins")
+  {
+    ShardedLRUCache<std::string> cache(100);
+    auto first = std::make_shared<std::string>("original");
+    auto second = std::make_shared<std::string>("duplicate");
+
+    auto inserted1 = cache.Insert("shared_key", first, 1);
+    EXPECT_EQ(inserted1, first);
+
+    auto inserted2 = cache.Insert("shared_key", second, 1);
+    EXPECT_EQ(inserted2, first);
+
+    auto looked_up = cache.Lookup("shared_key");
+    ASSERT_NE(looked_up, nullptr);
+    EXPECT_EQ(*looked_up, "original");
+  }
+}
+
 }  // namespace
 }  // namespace strata

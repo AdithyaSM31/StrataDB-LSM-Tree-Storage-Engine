@@ -600,7 +600,7 @@ void DBImpl::RemoveObsoleteFiles() {
       }
       if (!keep) {
         if (type == FileType::kTableFile && table_cache_ != nullptr) {
-          table_cache_->Evict(number);
+          table_cache_->Erase(number);
         }
         (void)env_->RemoveFile(dbname_ + "/" + filename);
       }
