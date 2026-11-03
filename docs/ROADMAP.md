@@ -44,9 +44,9 @@ Tick items off as they land; each one should arrive with its tests.
 - [x] Output splitting by size and by grandparent overlap
 - [x] Version refcounting and obsolete file deletion
 - [x] Write backpressure: slowdown at 8 L0 files, stop at 12
-- [ ] Merging iterator (forward and reverse) and `DBIter`
-- [ ] Snapshots: list of live snapshots, oldest-snapshot rule in compaction
-- [ ] Model-based randomized test with reopen, snapshots and `CompactRange`
+- [x] Merging iterator (forward and reverse) and `DBIter`
+- [x] Snapshots: list of live snapshots, oldest-snapshot rule in compaction
+- [x] Model-based randomized test with reopen, snapshots and `CompactRange`
 
 ## Week 4 (23–29 Nov): concurrency, caching and crash safety
 

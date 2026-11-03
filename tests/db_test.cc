@@ -714,7 +714,7 @@ TEST_F(DBTest, FutureMethodsReturnNotSupported) {
   std::unique_ptr<Iterator> it = db_->NewIterator(ReadOptions());
   ASSERT_NE(it, nullptr);
   EXPECT_FALSE(it->Valid());
-  EXPECT_TRUE(it->status().IsNotSupported());
+  EXPECT_TRUE(it->status().ok());
 
   std::string prop;
   EXPECT_FALSE(db_->GetProperty("strata.stats", &prop));
@@ -1554,6 +1554,103 @@ TEST_F(DBTest, UserKeyBoundarySplitNeverSplitsSameKeyAcrossFiles) {
   EXPECT_EQ(Get("a_key"), "val_a");
   EXPECT_EQ(Get("hot_key"), std::string(100, 'x'));
   EXPECT_EQ(Get("z_key"), "val_z");
+
+  db_->ReleaseSnapshot(snap);
+}
+
+TEST_F(DBTest, IteratorAcrossMemTableAndSSTables) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // L1 data
+  ASSERT_TRUE(Put("k1", "v1").ok());
+  ASSERT_TRUE(Put("k3", "v3").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  dbfull()->TEST_CompactRange(0, nullptr, nullptr);
+
+  // L0 data
+  ASSERT_TRUE(Put("k2", "v2").ok());
+  ASSERT_TRUE(Put("k5", "v5").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // MemTable data
+  ASSERT_TRUE(Put("k4", "v4").ok());
+
+  auto iter = db_->NewIterator(ReadOptions());
+  ASSERT_NE(iter, nullptr);
+
+  std::vector<std::pair<std::string, std::string>> expected = {
+      {"k1", "v1"}, {"k2", "v2"}, {"k3", "v3"}, {"k4", "v4"}, {"k5", "v5"}};
+
+  // Forward scan
+  std::vector<std::pair<std::string, std::string>> forward_seen;
+  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    forward_seen.emplace_back(std::string(iter->key()), std::string(iter->value()));
+  }
+  EXPECT_EQ(forward_seen, expected);
+
+  // Reverse scan
+  std::vector<std::pair<std::string, std::string>> reverse_seen;
+  for (iter->SeekToLast(); iter->Valid(); iter->Prev()) {
+    reverse_seen.emplace_back(std::string(iter->key()), std::string(iter->value()));
+  }
+  std::reverse(reverse_seen.begin(), reverse_seen.end());
+  EXPECT_EQ(reverse_seen, expected);
+
+  // Seek tests
+  iter->Seek("k3");
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "k3");
+  EXPECT_EQ(iter->value(), "v3");
+
+  iter->Seek("k25");
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "k3");
+
+  iter->Seek("k6");
+  EXPECT_FALSE(iter->Valid());
+}
+
+TEST_F(DBTest, IteratorWithSnapshotIsolation) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("a", "v_a1").ok());
+  ASSERT_TRUE(Put("b", "v_b1").ok());
+  ASSERT_TRUE(Put("c", "v_c1").ok());
+
+  const Snapshot* snap = db_->GetSnapshot();
+
+  // Modify data after snapshot
+  ASSERT_TRUE(Put("a", "v_a2").ok());
+  ASSERT_TRUE(Delete("b").ok());
+  ASSERT_TRUE(Put("d", "v_d1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // Read with snapshot
+  ReadOptions snap_opts;
+  snap_opts.snapshot = snap;
+  auto snap_iter = db_->NewIterator(snap_opts);
+
+  std::vector<std::pair<std::string, std::string>> snap_expected = {
+      {"a", "v_a1"}, {"b", "v_b1"}, {"c", "v_c1"}};
+  std::vector<std::pair<std::string, std::string>> snap_seen;
+  for (snap_iter->SeekToFirst(); snap_iter->Valid(); snap_iter->Next()) {
+    snap_seen.emplace_back(std::string(snap_iter->key()), std::string(snap_iter->value()));
+  }
+  EXPECT_EQ(snap_seen, snap_expected);
+
+  // Read current
+  auto cur_iter = db_->NewIterator(ReadOptions());
+  std::vector<std::pair<std::string, std::string>> cur_expected = {
+      {"a", "v_a2"}, {"c", "v_c1"}, {"d", "v_d1"}};
+  std::vector<std::pair<std::string, std::string>> cur_seen;
+  for (cur_iter->SeekToFirst(); cur_iter->Valid(); cur_iter->Next()) {
+    cur_seen.emplace_back(std::string(cur_iter->key()), std::string(cur_iter->value()));
+  }
+  EXPECT_EQ(cur_seen, cur_expected);
 
   db_->ReleaseSnapshot(snap);
 }

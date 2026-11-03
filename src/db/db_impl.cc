@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "db/builder.h"
+#include "db/db_iter.h"
 #include "db/dbformat.h"
 #include "db/filename.h"
 #include "db/table_cache.h"
@@ -759,8 +760,68 @@ void DBImpl::ReleaseSnapshot(const Snapshot* snapshot) {
   snapshots_.Delete(static_cast<const SnapshotImpl*>(snapshot));
 }
 
-std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*opts*/) {
-  return NewErrorIterator(Status::NotSupported("NewIterator is not supported in Week 1"));
+std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& opts) {
+  SequenceNumber sequence = 0;
+  std::vector<std::unique_ptr<Iterator>> list;
+  MemTable* mem = nullptr;
+  MemTable* imm = nullptr;
+  Version* current = nullptr;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (opts.snapshot != nullptr) {
+      sequence = static_cast<const SnapshotImpl*>(opts.snapshot)->sequence_number();
+    } else {
+      sequence = versions_->LastSequence();
+    }
+
+    mem = mem_;
+    imm = imm_;
+    current = versions_->current();
+
+    mem->Ref();
+    if (imm != nullptr) {
+      imm->Ref();
+    }
+    current->Ref();
+
+    list.push_back(mem->NewIterator());
+    if (imm != nullptr) {
+      list.push_back(imm->NewIterator());
+    }
+
+    for (FileMetaData* f : current->files(0)) {
+      list.push_back(table_cache_->NewIterator(f->number, f->file_size));
+    }
+
+    for (int level = 1; level < kNumLevels; ++level) {
+      if (!current->files(level).empty()) {
+        auto index_iter = std::make_unique<LevelFileIndexIterator>(&icmp_, current->files(level));
+        auto block_fn = [this](std::string_view handle) -> std::unique_ptr<Iterator> {
+          uint64_t number = 0;
+          uint64_t file_size = 0;
+          std::string_view in = handle;
+          if (!GetVarint64(&in, &number) || !GetVarint64(&in, &file_size)) {
+            return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
+          }
+          return table_cache_->NewIterator(number, file_size);
+        };
+        list.push_back(NewTwoLevelIterator(std::move(index_iter), std::move(block_fn)));
+      }
+    }
+  }
+
+  auto internal_iter = NewMergingIterator(&icmp_, std::move(list));
+  auto db_iter = NewDBIterator(BytewiseComparator(), std::move(internal_iter), sequence);
+  db_iter->RegisterCleanup([this, mem, imm, current]() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mem->Unref();
+    if (imm != nullptr) {
+      imm->Unref();
+    }
+    current->Unref();
+  });
+  return db_iter;
 }
 
 Status DBImpl::Flush() {
