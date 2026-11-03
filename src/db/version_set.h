@@ -34,6 +34,8 @@ class Version {
   void Ref() { ++refs_; }
   void Unref();
 
+  Status Get(const ReadOptions& options, const LookupKey& key, std::string* value,
+             TableCache* cache) const;
   Status Get(const LookupKey& key, std::string* value, TableCache* cache) const;
 
   const std::vector<FileMetaData*>& files(int level) const {
@@ -231,6 +233,9 @@ class Compaction {
 // Returns an iterator over the entries of a sorted, non-overlapping list of
 // files (one level >= 1, or the inputs of a compaction from such a level),
 // opening each file through the table cache only when the scan reaches it.
+std::unique_ptr<Iterator> NewLevelFileIterator(const ReadOptions& options,
+                                               const InternalKeyComparator* icmp, TableCache* cache,
+                                               std::vector<FileMetaData*> files);
 std::unique_ptr<Iterator> NewLevelFileIterator(const InternalKeyComparator* icmp, TableCache* cache,
                                                std::vector<FileMetaData*> files);
 
