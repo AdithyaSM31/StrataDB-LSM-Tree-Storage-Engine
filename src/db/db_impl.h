@@ -109,6 +109,8 @@ class DBImpl : public DB {
   int TEST_WritersCount();
   SequenceNumber TEST_LastSequence();
   void TEST_SetLastSequence(SequenceNumber seq);
+  BlockCache* block_cache() const { return block_cache_.get(); }
+  TableCache* table_cache() const { return table_cache_.get(); }
 
  private:
   struct Writer {
@@ -165,6 +167,7 @@ class DBImpl : public DB {
   Status bg_error_;  // sticky; guarded by mutex_
   // Set if Open stopped replaying the WAL at a corruption (paranoid_checks off).
   Status recovery_status_;  // guarded by mutex_
+  std::unique_ptr<BlockCache> block_cache_;
   std::unique_ptr<TableCache> table_cache_;
   SnapshotList snapshots_;  // guarded by mutex_
 

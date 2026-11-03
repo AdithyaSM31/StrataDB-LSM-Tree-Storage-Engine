@@ -1355,6 +1355,23 @@ TEST_F(DBTest, TinyWriteBufferIsRaisedToTheMinimum) {
   EXPECT_EQ(CountFiles(FileType::kTableFile), 1);
 }
 
+TEST_F(DBTest, MaxOpenFilesIsClamped) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.max_open_files = 10;
+  ASSERT_TRUE(Open(opts).ok());
+  auto* impl = static_cast<DBImpl*>(db_.get());
+  // Clamped to at least 64. TableCache capacity is clamped to 64 - 10 = 54.
+  for (int i = 0; i < 70; ++i) {
+    ASSERT_TRUE(Put("k" + std::to_string(i), "v").ok());
+    ASSERT_TRUE(db_->Flush().ok());
+  }
+  for (int i = 0; i < 70; ++i) {
+    EXPECT_EQ(Get("k" + std::to_string(i)), "v");
+  }
+  EXPECT_LE(impl->table_cache()->TotalCharge(), 54u);
+}
+
 // ---------------------------------------------------------------------------
 // Week 3 Compaction Integration Tests
 // ---------------------------------------------------------------------------
@@ -2791,6 +2808,237 @@ TEST_F(DBTest, MultipleFlushesInterspersedWithWrites) {
       EXPECT_EQ(Get(key), val);
     }
   }
+}
+
+TEST_F(DBTest, SecondReadIsFree) {
+  class ReadCountingEnv : public EnvWrapper {
+   public:
+    explicit ReadCountingEnv(Env* target) : EnvWrapper(target) {}
+
+    Status NewRandomAccessFile(const std::string& fname,
+                               std::unique_ptr<RandomAccessFile>* result) override {
+      std::unique_ptr<RandomAccessFile> target_file;
+      Status s = target()->NewRandomAccessFile(fname, &target_file);
+      if (!s.ok()) {
+        return s;
+      }
+      if (fname.size() >= 4 && fname.substr(fname.size() - 4) == ".sst") {
+        *result = std::make_unique<CountingFile>(std::move(target_file), &total_reads_);
+      } else {
+        *result = std::move(target_file);
+      }
+      return Status::OK();
+    }
+
+    int total_reads() const { return total_reads_.load(std::memory_order_relaxed); }
+    void ResetReads() { total_reads_.store(0, std::memory_order_relaxed); }
+
+   private:
+    class CountingFile : public RandomAccessFileWrapper {
+     public:
+      CountingFile(std::unique_ptr<RandomAccessFile> target, std::atomic<int>* reads)
+          : RandomAccessFileWrapper(std::move(target)), reads_(reads) {}
+
+      Status Read(uint64_t offset, size_t n, std::string_view* result,
+                  char* scratch) const override {
+        reads_->fetch_add(1, std::memory_order_relaxed);
+        return RandomAccessFileWrapper::Read(offset, n, result, scratch);
+      }
+
+     private:
+      std::atomic<int>* reads_;
+    };
+
+    std::atomic<int> total_reads_{0};
+  };
+
+  auto counting_env = std::make_unique<ReadCountingEnv>(Env::Default());
+  auto* env_ptr = counting_env.get();
+  custom_env_ = std::move(counting_env);
+  Options options;
+  options.create_if_missing = true;
+  options.block_cache_capacity = 8 * 1024 * 1024;
+  options.env = env_ptr;
+  ASSERT_TRUE(Open(options).ok());
+
+  // Write table 1
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(Put("k1_" + std::to_string(i), std::string(100, 'v')).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // Write table 2
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(Put("k2_" + std::to_string(i), std::string(100, 'v')).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  auto* impl = static_cast<DBImpl*>(db_.get());
+  ASSERT_NE(impl->block_cache(), nullptr);
+
+  // 1. First read with fill_cache = true
+  env_ptr->ResetReads();
+  ReadOptions cache_ropts;
+  cache_ropts.fill_cache = true;
+  std::string val;
+  EXPECT_TRUE(db_->Get(cache_ropts, "k1_10", &val).ok());
+  EXPECT_GT(env_ptr->total_reads(), 0);
+  const size_t charge_after_first = impl->block_cache()->TotalCharge();
+  EXPECT_GT(charge_after_first, 0u);
+
+  // 2. Second read of same key: block is cached, zero file reads!
+  env_ptr->ResetReads();
+  EXPECT_TRUE(db_->Get(cache_ropts, "k1_10", &val).ok());
+  EXPECT_EQ(env_ptr->total_reads(), 0);
+
+  // 3. Read uncached key from table 2 with fill_cache = false
+  ReadOptions no_cache_ropts;
+  no_cache_ropts.fill_cache = false;
+  env_ptr->ResetReads();
+  EXPECT_TRUE(db_->Get(no_cache_ropts, "k2_10", &val).ok());
+  EXPECT_GT(env_ptr->total_reads(), 0);
+  EXPECT_EQ(impl->block_cache()->TotalCharge(), charge_after_first);  // cache doesn't grow
+
+  // 4. Read again with fill_cache = false: reads again from disk
+  env_ptr->ResetReads();
+  EXPECT_TRUE(db_->Get(no_cache_ropts, "k2_10", &val).ok());
+  EXPECT_GT(env_ptr->total_reads(), 0);
+  EXPECT_EQ(impl->block_cache()->TotalCharge(), charge_after_first);
+}
+
+TEST_F(DBTest, FileLimitHolds) {
+  class LiveFileCountingEnv : public EnvWrapper {
+   public:
+    explicit LiveFileCountingEnv(Env* target) : EnvWrapper(target) {}
+
+    Status NewRandomAccessFile(const std::string& fname,
+                               std::unique_ptr<RandomAccessFile>* result) override {
+      std::unique_ptr<RandomAccessFile> target_file;
+      Status s = target()->NewRandomAccessFile(fname, &target_file);
+      if (!s.ok()) {
+        return s;
+      }
+      if (fname.size() >= 4 && fname.substr(fname.size() - 4) == ".sst") {
+        *result = std::make_unique<CountingFile>(std::move(target_file), this);
+      } else {
+        *result = std::move(target_file);
+      }
+      return Status::OK();
+    }
+
+    int live_files() const { return live_files_.load(std::memory_order_relaxed); }
+    int max_live_files() const { return max_live_files_.load(std::memory_order_relaxed); }
+
+   private:
+    class CountingFile : public RandomAccessFileWrapper {
+     public:
+      CountingFile(std::unique_ptr<RandomAccessFile> target, LiveFileCountingEnv* env)
+          : RandomAccessFileWrapper(std::move(target)), env_(env) {
+        int cur = env_->live_files_.fetch_add(1, std::memory_order_relaxed) + 1;
+        int prev_max = env_->max_live_files_.load(std::memory_order_relaxed);
+        while (cur > prev_max && !env_->max_live_files_.compare_exchange_weak(prev_max, cur)) {
+        }
+      }
+      ~CountingFile() override { env_->live_files_.fetch_sub(1, std::memory_order_relaxed); }
+
+     private:
+      LiveFileCountingEnv* env_;
+    };
+
+    std::atomic<int> live_files_{0};
+    std::atomic<int> max_live_files_{0};
+  };
+
+  auto counting_env = std::make_unique<LiveFileCountingEnv>(Env::Default());
+  auto* env_ptr = counting_env.get();
+  custom_env_ = std::move(counting_env);
+  Options options;
+  options.create_if_missing = true;
+  options.max_open_files = 74;  // capacity = 74 - 10 = 64
+  options.env = env_ptr;
+  ASSERT_TRUE(Open(options).ok());
+
+  // Make about 150 SSTs
+  constexpr int kNumFiles = 150;
+  for (int i = 0; i < kNumFiles; ++i) {
+    std::string key = "key_" + std::to_string(i);
+    std::string val = "value_" + std::to_string(i);
+    ASSERT_TRUE(Put(key, val).ok());
+    ASSERT_TRUE(db_->Flush().ok());
+  }
+
+  // Find an SST file to pin with a table iterator
+  std::vector<std::string> filenames;
+  ASSERT_TRUE(env_ptr->GetChildren(test_dir_, &filenames).ok());
+  uint64_t pinned_file_number = 0;
+  FileType type;
+  for (const auto& fn : filenames) {
+    if (ParseFileName(fn, &pinned_file_number, &type) && type == FileType::kTableFile) {
+      break;
+    }
+  }
+  ASSERT_GT(pinned_file_number, 0ULL);
+
+  uint64_t file_size = 0;
+  ASSERT_TRUE(env_ptr->GetFileSize(TableFileName(test_dir_, pinned_file_number), &file_size).ok());
+  auto iter = static_cast<DBImpl*>(db_.get())->table_cache()->NewIterator(
+      ReadOptions(), pinned_file_number, file_size);
+  ASSERT_NE(iter, nullptr);
+
+  // Now read every key. The count should never go over 64 plus the 1 pinned iterator.
+  for (int i = 0; i < kNumFiles; ++i) {
+    std::string key = "key_" + std::to_string(i);
+    std::string expected_val = "value_" + std::to_string(i);
+    EXPECT_EQ(Get(key), expected_val);
+    EXPECT_LE(env_ptr->live_files(), 64 + 1);
+  }
+
+  // Peak live files may momentarily include the 1 table opened before cache insertion
+  // triggers eviction of an old entry (64 cached + 1 pinned + 1 transient open).
+  EXPECT_LE(env_ptr->max_live_files(), 64 + 1 + 1);
+
+  // Release the iterator
+  iter.reset();
+
+  // Re-read every key after iterator dropped. Live files never exceed 64.
+  for (int i = 0; i < kNumFiles; ++i) {
+    std::string key = "key_" + std::to_string(i);
+    std::string expected_val = "value_" + std::to_string(i);
+    EXPECT_EQ(Get(key), expected_val);
+    EXPECT_LE(env_ptr->live_files(), 64);
+  }
+
+  EXPECT_LE(env_ptr->live_files(), 64);
+}
+
+TEST_F(DBTest, CompactionDoesntTouchTheCache) {
+  Options options;
+  options.create_if_missing = true;
+  options.block_cache_capacity = 8 * 1024 * 1024;
+  ASSERT_TRUE(Open(options).ok());
+
+  // Write some data and flush to L0
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(Put("k" + std::to_string(i), std::string(100, 'x')).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // Read a key to populate cache
+  std::string val;
+  ReadOptions ropts;
+  ropts.fill_cache = true;
+  EXPECT_TRUE(db_->Get(ropts, "k0", &val).ok());
+
+  auto* impl = static_cast<DBImpl*>(db_.get());
+  ASSERT_NE(impl->block_cache(), nullptr);
+  const uint64_t inserts_before = impl->block_cache()->inserts();
+  EXPECT_GT(inserts_before, 0u);
+
+  // Compact the entire DB. Compaction reads must use fill_cache = false!
+  ASSERT_TRUE(db_->CompactRange("", "").ok());
+
+  // Cache inserts count must remain identical
+  EXPECT_EQ(impl->block_cache()->inserts(), inserts_before);
 }
 
 }  // namespace
