@@ -2866,7 +2866,7 @@ TEST_F(DBTest, SecondReadIsFree) {
   custom_env_ = std::move(counting_env);
   Options options;
   options.create_if_missing = true;
-  options.block_cache_capacity = 8 * 1024 * 1024;
+  options.block_cache_capacity = size_t{8} * 1024 * 1024;
   options.env = env_ptr;
   ASSERT_TRUE(Open(options).ok());
 
@@ -3023,7 +3023,7 @@ TEST_F(DBTest, FileLimitHolds) {
 TEST_F(DBTest, CompactionDoesntTouchTheCache) {
   Options options;
   options.create_if_missing = true;
-  options.block_cache_capacity = 8 * 1024 * 1024;
+  options.block_cache_capacity = size_t{8} * 1024 * 1024;
   ASSERT_TRUE(Open(options).ok());
 
   // Write some data and flush to L0

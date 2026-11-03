@@ -203,6 +203,7 @@ TEST(MergerTest, SwitchingDirectionRepeatedlyAgainstSortedModel) {
 
   std::vector<std::unique_ptr<Block>> blocks;
   std::vector<std::unique_ptr<Iterator>> children;
+  children.reserve(5);
   for (int i = 0; i < 5; ++i) {
     children.push_back(MakeBlockIterator(child_entries[i], &blocks));
   }

@@ -512,7 +512,7 @@ TEST(TableTest, SecondReadIsFreeWithBlockCache) {
   const Options options = TableOptions(256);
   const std::string contents = BuildTable(options, entries);
 
-  BlockCache cache(1024 * 1024);
+  BlockCache cache(size_t{1024} * 1024);
   StringSource* source = nullptr;
   std::unique_ptr<Table> table;
   ASSERT_TRUE(OpenTable(options, contents, &table, &source, &cache).ok());
