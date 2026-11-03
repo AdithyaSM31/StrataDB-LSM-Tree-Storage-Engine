@@ -871,7 +871,9 @@ void DBImpl::TEST_CompactRange(int level, const std::string* begin, const std::s
     while (!manual.done && bg_error_.ok() && !shutting_down_) {
       background_work_cv_.wait(lock);
     }
-    manual_compaction_ = nullptr;
+    if (manual_compaction_ == &manual) {
+      manual_compaction_ = nullptr;
+    }
   }
 }
 
@@ -881,17 +883,29 @@ int DBImpl::TEST_NumLevelFiles(int level) {
 }
 
 Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
-  Status s = Flush();
-  if (!s.ok()) {
-    return s;
-  }
-
+  int max_level_with_files = 1;
   std::string begin_str(begin);
   std::string end_str(end);
   const std::string* begin_ptr = begin.empty() ? nullptr : &begin_str;
   const std::string* end_ptr = end.empty() ? nullptr : &end_str;
 
-  for (int level = 0; level < kNumLevels - 1; ++level) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int level = 1; level < kNumLevels; ++level) {
+      std::vector<FileMetaData*> overlapping;
+      versions_->GetOverlappingInputs(level, begin_ptr, end_ptr, &overlapping);
+      if (!overlapping.empty()) {
+        max_level_with_files = level;
+      }
+    }
+  }
+
+  Status s = Flush();
+  if (!s.ok()) {
+    return s;
+  }
+
+  for (int level = 0; level < max_level_with_files; ++level) {
     TEST_CompactRange(level, begin_ptr, end_ptr);
   }
   std::lock_guard<std::mutex> lock(mutex_);

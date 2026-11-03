@@ -84,6 +84,7 @@ void DBIter::Seek(std::string_view target) {
   if (iter_->Valid()) {
     FindNextUserEntry(false, &saved_key_);
   } else {
+    saved_key_.clear();
     valid_ = false;
   }
 }
@@ -94,6 +95,7 @@ void DBIter::FindNextUserEntry(bool skipping, std::string* skip) {
   do {
     ParsedInternalKey ikey;
     if (!ParseKey(&ikey)) {
+      saved_key_.clear();
       valid_ = false;
       return;
     }
@@ -150,6 +152,7 @@ void DBIter::Prev() {
       if (!iter_->Valid()) {
         valid_ = false;
         direction_ = kReverse;
+        saved_key_.clear();
         ClearSavedValue();
         return;
       }
@@ -157,6 +160,7 @@ void DBIter::Prev() {
       if (!ParseKey(&ikey)) {
         valid_ = false;
         direction_ = kReverse;
+        saved_key_.clear();
         ClearSavedValue();
         return;
       }
@@ -179,6 +183,7 @@ void DBIter::FindPrevUserEntry() {
       ParsedInternalKey ikey;
       if (!ParseKey(&ikey)) {
         valid_ = false;
+        saved_key_.clear();
         ClearSavedValue();
         return;
       }

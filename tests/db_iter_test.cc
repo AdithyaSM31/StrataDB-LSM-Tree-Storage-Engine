@@ -407,5 +407,89 @@ TEST(DBIterTest, EmptyKeyAndEmptyValue) {
   EXPECT_EQ(iter->value(), "");
 }
 
+TEST(DBIterTest, SeekToLastWithLastKeyDeleted) {
+  InternalKeyComparator icmp;
+  std::vector<std::pair<std::string, std::string>> entries = {
+      {MakeInternalKey("a", 10, kTypeValue), "va"}, {MakeInternalKey("z", 10, kTypeDeletion), ""}};
+
+  auto iter = CreateDBIter(entries, 100, &icmp);
+
+  iter->SeekToLast();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "a");
+  EXPECT_EQ(iter->value(), "va");
+
+  iter->Next();
+  EXPECT_FALSE(iter->Valid());
+}
+
+TEST(DBIterTest, ReverseScanSkippingFutureKeys) {
+  InternalKeyComparator icmp;
+  std::vector<std::pair<std::string, std::string>> entries = {
+      {MakeInternalKey("a", 10, kTypeValue), "va"},
+      {MakeInternalKey("b", 50, kTypeValue), "vb_future"},
+      {MakeInternalKey("b", 10, kTypeValue), "vb_vis"},
+      {MakeInternalKey("c", 10, kTypeValue), "vc"}};
+
+  auto iter = CreateDBIter(entries, 20, &icmp);
+
+  iter->SeekToLast();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "c");
+  EXPECT_EQ(iter->value(), "vc");
+
+  iter->Prev();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "b");
+  EXPECT_EQ(iter->value(), "vb_vis");
+
+  iter->Prev();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "a");
+  EXPECT_EQ(iter->value(), "va");
+
+  iter->Prev();
+  EXPECT_FALSE(iter->Valid());
+}
+
+TEST(DBIterTest, DirectionSwitchOverFutureKey) {
+  InternalKeyComparator icmp;
+  std::vector<std::pair<std::string, std::string>> entries = {
+      {MakeInternalKey("a", 10, kTypeValue), "va"},
+      {MakeInternalKey("b", 100, kTypeValue), "vb_future1"},
+      {MakeInternalKey("b", 50, kTypeValue), "vb_future2"},
+      {MakeInternalKey("b", 10, kTypeValue), "vb_vis"},
+      {MakeInternalKey("c", 10, kTypeValue), "vc"}};
+
+  auto iter = CreateDBIter(entries, 20, &icmp);
+
+  iter->SeekToLast();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "c");
+
+  iter->Prev();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "b");
+  EXPECT_EQ(iter->value(), "vb_vis");
+
+  iter->Prev();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "a");
+
+  // Switch direction to forward: should land on "b" with vb_vis
+  iter->Next();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "b");
+  EXPECT_EQ(iter->value(), "vb_vis");
+
+  // Switch direction to reverse: should land on "a"
+  iter->Prev();
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), "a");
+
+  iter->Prev();
+  EXPECT_FALSE(iter->Valid());
+}
+
 }  // namespace
 }  // namespace strata

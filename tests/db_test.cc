@@ -1655,5 +1655,56 @@ TEST_F(DBTest, IteratorWithSnapshotIsolation) {
   db_->ReleaseSnapshot(snap);
 }
 
+TEST_F(DBTest, CompactRangeStopsAtMaxLevel) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  ASSERT_TRUE(Put("k1", "v1").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(0), 1);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(1), 0);
+
+  // CompactRange on database with only L0 data should compact L0 into L1,
+  // and NOT cascade down into L2, L3, L4, L5, L6.
+  ASSERT_TRUE(db_->CompactRange("", "").ok());
+
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(0), 0);
+  EXPECT_EQ(dbfull()->TEST_NumLevelFiles(1), 1);
+  for (int lvl = 2; lvl < kNumLevels; ++lvl) {
+    EXPECT_EQ(dbfull()->TEST_NumLevelFiles(lvl), 0);
+  }
+}
+
+TEST_F(DBTest, ConcurrentCompactRange) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(Put("k" + std::to_string(i), "val" + std::to_string(i)).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  std::vector<std::thread> compacters;
+  for (int t = 0; t < 3; ++t) {
+    compacters.emplace_back([this] {
+      for (int i = 0; i < 5; ++i) {
+        Status s = db_->CompactRange("", "");
+        EXPECT_TRUE(s.ok());
+      }
+    });
+  }
+
+  for (auto& t : compacters) {
+    t.join();
+  }
+
+  for (int i = 0; i < 50; ++i) {
+    EXPECT_EQ(Get("k" + std::to_string(i)), "val" + std::to_string(i));
+  }
+}
+
 }  // namespace
 }  // namespace strata
