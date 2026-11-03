@@ -1998,410 +1998,410 @@ TEST_F(DBTest, FlushRunsWhileACompactionIsInProgress) {
 
   EXPECT_EQ(Get("k1000"), std::string(100, 'b'));
   EXPECT_EQ(Get("m59"), std::string(1000, 'm'));
-  class GroupCommitTestEnv : public EnvWrapper {
+}
+
+class GroupCommitTestEnv : public EnvWrapper {
+ public:
+  explicit GroupCommitTestEnv(Env* target) : EnvWrapper(target) {}
+
+  Status NewWritableFile(const std::string& fname, std::unique_ptr<WritableFile>* result) override {
+    std::unique_ptr<WritableFile> base_file;
+    Status s = EnvWrapper::NewWritableFile(fname, &base_file);
+    if (!s.ok()) {
+      return s;
+    }
+    uint64_t num = 0;
+    FileType type = FileType::kTableFile;
+    size_t slash = fname.rfind('/');
+    std::string_view basename =
+        (slash == std::string::npos) ? fname : std::string_view(fname).substr(slash + 1);
+    if (ParseFileName(basename, &num, &type) && type == FileType::kLogFile) {
+      *result = std::make_unique<GroupCommitTestWritableFile>(std::move(base_file), this);
+    } else {
+      *result = std::move(base_file);
+    }
+    return Status::OK();
+  }
+
+  void HoldNextSync() {
+    hold_sync_.store(true);
+    in_sync_.store(false);
+    release_sync_.store(false);
+  }
+
+  void WaitForSyncToHold() {
+    while (!in_sync_.load()) {
+      std::this_thread::yield();
+    }
+  }
+
+  void ReleaseSync() {
+    hold_sync_.store(false);
+    release_sync_.store(true);
+  }
+
+  void HoldNextAppend() {
+    hold_append_.store(true);
+    in_append_.store(false);
+    release_append_.store(false);
+  }
+
+  void WaitForAppendToHold() {
+    while (!in_append_.load()) {
+      std::this_thread::yield();
+    }
+  }
+
+  void ReleaseAppend() {
+    hold_append_.store(false);
+    release_append_.store(true);
+  }
+
+  void SetFailSync(bool fail) { fail_sync_.store(fail); }
+
+  void SetFailOnSyncNumber(int n) { fail_on_sync_num_.store(n); }
+
+  int wal_sync_count() const { return wal_sync_count_.load(); }
+  void reset_wal_sync_count() { wal_sync_count_.store(0); }
+
+ private:
+  class GroupCommitTestWritableFile : public WritableFileWrapper {
    public:
-    explicit GroupCommitTestEnv(Env* target) : EnvWrapper(target) {}
+    GroupCommitTestWritableFile(std::unique_ptr<WritableFile> target, GroupCommitTestEnv* env)
+        : WritableFileWrapper(std::move(target)), env_(env) {}
 
-    Status NewWritableFile(const std::string& fname,
-                           std::unique_ptr<WritableFile>* result) override {
-      std::unique_ptr<WritableFile> base_file;
-      Status s = EnvWrapper::NewWritableFile(fname, &base_file);
-      if (!s.ok()) {
-        return s;
+    Status Append(std::string_view data) override {
+      if (env_->hold_append_.load()) {
+        env_->in_append_.store(true);
+        while (!env_->release_append_.load()) {
+          std::this_thread::yield();
+        }
       }
-      uint64_t num = 0;
-      FileType type = FileType::kTableFile;
-      size_t slash = fname.rfind('/');
-      std::string_view basename =
-          (slash == std::string::npos) ? fname : std::string_view(fname).substr(slash + 1);
-      if (ParseFileName(basename, &num, &type) && type == FileType::kLogFile) {
-        *result = std::make_unique<GroupCommitTestWritableFile>(std::move(base_file), this);
-      } else {
-        *result = std::move(base_file);
+      return WritableFileWrapper::Append(data);
+    }
+
+    Status Sync() override {
+      if (env_->hold_sync_.load()) {
+        env_->in_sync_.store(true);
+        while (!env_->release_sync_.load()) {
+          std::this_thread::yield();
+        }
       }
-      return Status::OK();
-    }
-
-    void HoldNextSync() {
-      hold_sync_.store(true);
-      in_sync_.store(false);
-      release_sync_.store(false);
-    }
-
-    void WaitForSyncToHold() {
-      while (!in_sync_.load()) {
-        std::this_thread::yield();
+      int sync_idx = env_->wal_sync_count_.fetch_add(1) + 1;
+      if (env_->fail_sync_.load() || env_->fail_on_sync_num_.load() == sync_idx) {
+        return Status::IOError("injected WAL sync failure");
       }
+      return WritableFileWrapper::Sync();
     }
-
-    void ReleaseSync() {
-      hold_sync_.store(false);
-      release_sync_.store(true);
-    }
-
-    void HoldNextAppend() {
-      hold_append_.store(true);
-      in_append_.store(false);
-      release_append_.store(false);
-    }
-
-    void WaitForAppendToHold() {
-      while (!in_append_.load()) {
-        std::this_thread::yield();
-      }
-    }
-
-    void ReleaseAppend() {
-      hold_append_.store(false);
-      release_append_.store(true);
-    }
-
-    void SetFailSync(bool fail) { fail_sync_.store(fail); }
-
-    void SetFailOnSyncNumber(int n) { fail_on_sync_num_.store(n); }
-
-    int wal_sync_count() const { return wal_sync_count_.load(); }
-    void reset_wal_sync_count() { wal_sync_count_.store(0); }
 
    private:
-    class GroupCommitTestWritableFile : public WritableFileWrapper {
-     public:
-      GroupCommitTestWritableFile(std::unique_ptr<WritableFile> target, GroupCommitTestEnv* env)
-          : WritableFileWrapper(std::move(target)), env_(env) {}
-
-      Status Append(std::string_view data) override {
-        if (env_->hold_append_.load()) {
-          env_->in_append_.store(true);
-          while (!env_->release_append_.load()) {
-            std::this_thread::yield();
-          }
-        }
-        return WritableFileWrapper::Append(data);
-      }
-
-      Status Sync() override {
-        if (env_->hold_sync_.load()) {
-          env_->in_sync_.store(true);
-          while (!env_->release_sync_.load()) {
-            std::this_thread::yield();
-          }
-        }
-        int sync_idx = env_->wal_sync_count_.fetch_add(1) + 1;
-        if (env_->fail_sync_.load() || env_->fail_on_sync_num_.load() == sync_idx) {
-          return Status::IOError("injected WAL sync failure");
-        }
-        return WritableFileWrapper::Sync();
-      }
-
-     private:
-      GroupCommitTestEnv* env_;
-    };
-
-    std::atomic<int> wal_sync_count_{0};
-    std::atomic<bool> hold_sync_{false};
-    std::atomic<bool> in_sync_{false};
-    std::atomic<bool> release_sync_{false};
-    std::atomic<bool> hold_append_{false};
-    std::atomic<bool> in_append_{false};
-    std::atomic<bool> release_append_{false};
-    std::atomic<bool> fail_sync_{false};
-    std::atomic<int> fail_on_sync_num_{0};
+    GroupCommitTestEnv* env_;
   };
 
-  TEST_F(DBTest, GroupCommitHappens) {
-    auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
-    GroupCommitTestEnv* env_ptr = test_env.get();
-    custom_env_ = std::move(test_env);
+  std::atomic<int> wal_sync_count_{0};
+  std::atomic<bool> hold_sync_{false};
+  std::atomic<bool> in_sync_{false};
+  std::atomic<bool> release_sync_{false};
+  std::atomic<bool> hold_append_{false};
+  std::atomic<bool> in_append_{false};
+  std::atomic<bool> release_append_{false};
+  std::atomic<bool> fail_sync_{false};
+  std::atomic<int> fail_on_sync_num_{0};
+};
 
-    Options opts;
-    opts.create_if_missing = true;
-    opts.env = env_ptr;
-    ASSERT_TRUE(Open(opts).ok());
+TEST_F(DBTest, GroupCommitHappens) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
 
-    env_ptr->reset_wal_sync_count();
-    env_ptr->HoldNextSync();
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
 
-    std::vector<std::thread> writers;
-    std::vector<Status> statuses(10);
+  env_ptr->reset_wal_sync_count();
+  env_ptr->HoldNextSync();
 
-    // Writer 0 becomes leader and is held in WAL Sync()
-    writers.emplace_back([this, &statuses] {
+  std::vector<std::thread> writers;
+  std::vector<Status> statuses(10);
+
+  // Writer 0 becomes leader and is held in WAL Sync()
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[0] = Put("k0", "v0", wo);
+  });
+
+  env_ptr->WaitForSyncToHold();
+
+  // Queue 9 more sync writers behind Writer 0
+  for (int i = 1; i < 10; ++i) {
+    writers.emplace_back([this, &statuses, i] {
       WriteOptions wo;
       wo.sync = true;
-      statuses[0] = Put("k0", "v0", wo);
+      statuses[i] = Put("k" + std::to_string(i), "v" + std::to_string(i), wo);
     });
-
-    env_ptr->WaitForSyncToHold();
-
-    // Queue 9 more sync writers behind Writer 0
-    for (int i = 1; i < 10; ++i) {
-      writers.emplace_back([this, &statuses, i] {
-        WriteOptions wo;
-        wo.sync = true;
-        statuses[i] = Put("k" + std::to_string(i), "v" + std::to_string(i), wo);
-      });
-    }
-
-    // Wait until all 10 writers are in the queue
-    while (dbfull()->TEST_WritersCount() < 10) {
-      std::this_thread::yield();
-    }
-
-    // Release the held sync. Writer 0 finishes sync #1.
-    // Writer 1 becomes leader, batches writers 1..9, and executes sync #2.
-    env_ptr->ReleaseSync();
-
-    for (auto& t : writers) {
-      t.join();
-    }
-
-    for (int i = 0; i < 10; ++i) {
-      EXPECT_TRUE(statuses[i].ok());
-      EXPECT_EQ(Get("k" + std::to_string(i)), "v" + std::to_string(i));
-    }
-
-    // Expect exactly 2 syncs for 10 writes!
-    EXPECT_EQ(env_ptr->wal_sync_count(), 2);
   }
 
-  TEST_F(DBTest, NoUnsyncedSyncWrites) {
-    auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
-    GroupCommitTestEnv* env_ptr = test_env.get();
-    custom_env_ = std::move(test_env);
+  // Wait until all 10 writers are in the queue
+  while (dbfull()->TEST_WritersCount() < 10) {
+    std::this_thread::yield();
+  }
 
-    Options opts;
-    opts.create_if_missing = true;
-    opts.env = env_ptr;
-    ASSERT_TRUE(Open(opts).ok());
+  // Release the held sync. Writer 0 finishes sync #1.
+  // Writer 1 becomes leader, batches writers 1..9, and executes sync #2.
+  env_ptr->ReleaseSync();
 
-    env_ptr->reset_wal_sync_count();
-    env_ptr->HoldNextAppend();
+  for (auto& t : writers) {
+    t.join();
+  }
 
-    std::thread non_sync_writer([this] {
-      WriteOptions wo;
-      wo.sync = false;
-      EXPECT_TRUE(Put("k_async", "v_async", wo).ok());
-    });
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_TRUE(statuses[i].ok());
+    EXPECT_EQ(Get("k" + std::to_string(i)), "v" + std::to_string(i));
+  }
 
-    env_ptr->WaitForAppendToHold();
+  // Expect exactly 2 syncs for 10 writes!
+  EXPECT_EQ(env_ptr->wal_sync_count(), 2);
+}
 
-    std::thread sync_writer([this] {
+TEST_F(DBTest, NoUnsyncedSyncWrites) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
+
+  env_ptr->reset_wal_sync_count();
+  env_ptr->HoldNextAppend();
+
+  std::thread non_sync_writer([this] {
+    WriteOptions wo;
+    wo.sync = false;
+    EXPECT_TRUE(Put("k_async", "v_async", wo).ok());
+  });
+
+  env_ptr->WaitForAppendToHold();
+
+  std::thread sync_writer([this] {
+    WriteOptions wo;
+    wo.sync = true;
+    EXPECT_TRUE(Put("k_sync", "v_sync", wo).ok());
+  });
+
+  while (dbfull()->TEST_WritersCount() < 2) {
+    std::this_thread::yield();
+  }
+
+  // Release non-sync writer. It must NOT batch the sync writer because
+  // non-sync leader cannot acknowledge a sync follower without fsync.
+  env_ptr->ReleaseAppend();
+
+  non_sync_writer.join();
+  sync_writer.join();
+
+  EXPECT_EQ(Get("k_async"), "v_async");
+  EXPECT_EQ(Get("k_sync"), "v_sync");
+
+  // The sync writer's record must get its own Sync (1 sync total for the WAL).
+  EXPECT_EQ(env_ptr->wal_sync_count(), 1);
+}
+
+TEST_F(DBTest, SyncFailureStickyAcrossGroup) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
+
+  env_ptr->reset_wal_sync_count();
+  env_ptr->HoldNextSync();
+
+  std::vector<std::thread> writers;
+  std::vector<Status> statuses(4);
+
+  // Writer 0 enters Sync and holds
+  writers.emplace_back([this, &statuses] {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[0] = Put("k0", "v0", wo);
+  });
+
+  env_ptr->WaitForSyncToHold();
+
+  // Writers 1, 2, 3 queue up while Writer 0 is holding
+  for (int i = 1; i < 4; ++i) {
+    writers.emplace_back([this, &statuses, i] {
       WriteOptions wo;
       wo.sync = true;
-      EXPECT_TRUE(Put("k_sync", "v_sync", wo).ok());
+      statuses[i] = Put("k" + std::to_string(i), "v" + std::to_string(i), wo);
     });
-
-    while (dbfull()->TEST_WritersCount() < 2) {
-      std::this_thread::yield();
-    }
-
-    // Release non-sync writer. It must NOT batch the sync writer because
-    // non-sync leader cannot acknowledge a sync follower without fsync.
-    env_ptr->ReleaseAppend();
-
-    non_sync_writer.join();
-    sync_writer.join();
-
-    EXPECT_EQ(Get("k_async"), "v_async");
-    EXPECT_EQ(Get("k_sync"), "v_sync");
-
-    // The sync writer's record must get its own Sync (1 sync total for the WAL).
-    EXPECT_EQ(env_ptr->wal_sync_count(), 1);
   }
 
-  TEST_F(DBTest, SyncFailureStickyAcrossGroup) {
-    auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
-    GroupCommitTestEnv* env_ptr = test_env.get();
-    custom_env_ = std::move(test_env);
-
-    Options opts;
-    opts.create_if_missing = true;
-    opts.env = env_ptr;
-    ASSERT_TRUE(Open(opts).ok());
-
-    env_ptr->reset_wal_sync_count();
-    env_ptr->HoldNextSync();
-
-    std::vector<std::thread> writers;
-    std::vector<Status> statuses(4);
-
-    // Writer 0 enters Sync and holds
-    writers.emplace_back([this, &statuses] {
-      WriteOptions wo;
-      wo.sync = true;
-      statuses[0] = Put("k0", "v0", wo);
-    });
-
-    env_ptr->WaitForSyncToHold();
-
-    // Writers 1, 2, 3 queue up while Writer 0 is holding
-    for (int i = 1; i < 4; ++i) {
-      writers.emplace_back([this, &statuses, i] {
-        WriteOptions wo;
-        wo.sync = true;
-        statuses[i] = Put("k" + std::to_string(i), "v" + std::to_string(i), wo);
-      });
-    }
-
-    while (dbfull()->TEST_WritersCount() < 4) {
-      std::this_thread::yield();
-    }
-
-    // Make sync #2 (the group sync for writers 1, 2, 3) fail
-    env_ptr->SetFailOnSyncNumber(2);
-    env_ptr->ReleaseSync();
-
-    for (auto& t : writers) {
-      t.join();
-    }
-
-    // Writer 0 succeeded (sync #1 succeeded)
-    EXPECT_TRUE(statuses[0].ok());
-    EXPECT_EQ(Get("k0"), "v0");
-
-    // Every writer in the queued group (writers 1, 2, 3) gets the sync failure error
-    for (int i = 1; i < 4; ++i) {
-      EXPECT_FALSE(statuses[i].ok());
-      EXPECT_TRUE(statuses[i].IsIOError());
-    }
-
-    // The next Put also returns the sticky error
-    Status next_s = Put("k_next", "v_next");
-    EXPECT_FALSE(next_s.ok());
-    EXPECT_TRUE(next_s.IsIOError());
+  while (dbfull()->TEST_WritersCount() < 4) {
+    std::this_thread::yield();
   }
 
-  TEST_F(DBTest, ConcurrentWritesNoSequenceGaps) {
-    Options opts;
-    opts.create_if_missing = true;
-    ASSERT_TRUE(Open(opts).ok());
+  // Make sync #2 (the group sync for writers 1, 2, 3) fail
+  env_ptr->SetFailOnSyncNumber(2);
+  env_ptr->ReleaseSync();
 
-    constexpr int kThreads = 8;
-    constexpr int kPutsPerThread = 2000;
-    std::vector<std::thread> threads;
-    threads.reserve(kThreads);
+  for (auto& t : writers) {
+    t.join();
+  }
 
-    for (int t = 0; t < kThreads; ++t) {
-      threads.emplace_back([this, t] {
-        for (int i = 0; i < kPutsPerThread; ++i) {
-          std::string key = "c_th_" + std::to_string(t) + "_k_" + std::to_string(i);
-          std::string val = "c_val_" + std::to_string(i);
-          Status s = Put(key, val);
-          EXPECT_TRUE(s.ok());
-        }
-      });
-    }
+  // Writer 0 succeeded (sync #1 succeeded)
+  EXPECT_TRUE(statuses[0].ok());
+  EXPECT_EQ(Get("k0"), "v0");
 
-    for (auto& t : threads) {
-      t.join();
-    }
+  // Every writer in the queued group (writers 1, 2, 3) gets the sync failure error
+  for (int i = 1; i < 4; ++i) {
+    EXPECT_FALSE(statuses[i].ok());
+    EXPECT_TRUE(statuses[i].IsIOError());
+  }
 
-    for (int t = 0; t < kThreads; ++t) {
+  // The next Put also returns the sticky error
+  Status next_s = Put("k_next", "v_next");
+  EXPECT_FALSE(next_s.ok());
+  EXPECT_TRUE(next_s.IsIOError());
+}
+
+TEST_F(DBTest, ConcurrentWritesNoSequenceGaps) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  constexpr int kThreads = 8;
+  constexpr int kPutsPerThread = 2000;
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([this, t] {
       for (int i = 0; i < kPutsPerThread; ++i) {
         std::string key = "c_th_" + std::to_string(t) + "_k_" + std::to_string(i);
         std::string val = "c_val_" + std::to_string(i);
-        EXPECT_EQ(Get(key), val);
-      }
-    }
-
-    EXPECT_EQ(dbfull()->TEST_LastSequence(),
-              static_cast<SequenceNumber>(kThreads * kPutsPerThread));
-  }
-
-  TEST_F(DBTest, FlushDuringConcurrentWrites) {
-    Options opts;
-    opts.create_if_missing = true;
-    opts.write_buffer_size = 32 * 1024;
-    ASSERT_TRUE(Open(opts).ok());
-
-    std::atomic<bool> stop{false};
-    constexpr int kWriters = 4;
-    constexpr int kPutsPerWriter = 500;
-    std::vector<std::thread> writers;
-    writers.reserve(kWriters);
-
-    for (int t = 0; t < kWriters; ++t) {
-      writers.emplace_back([this, t] {
-        for (int i = 0; i < kPutsPerWriter; ++i) {
-          std::string key = "fl_th_" + std::to_string(t) + "_k_" + std::to_string(i);
-          std::string val = "fl_val_" + std::to_string(i);
-          Status s = Put(key, val);
-          EXPECT_TRUE(s.ok());
-        }
-      });
-    }
-
-    std::thread flush_thread([this, &stop] {
-      while (!stop.load(std::memory_order_relaxed)) {
-        (void)db_->Flush();
-        std::this_thread::yield();
+        Status s = Put(key, val);
+        EXPECT_TRUE(s.ok());
       }
     });
+  }
 
-    for (auto& t : writers) {
-      t.join();
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  for (int t = 0; t < kThreads; ++t) {
+    for (int i = 0; i < kPutsPerThread; ++i) {
+      std::string key = "c_th_" + std::to_string(t) + "_k_" + std::to_string(i);
+      std::string val = "c_val_" + std::to_string(i);
+      EXPECT_EQ(Get(key), val);
     }
-    stop.store(true, std::memory_order_relaxed);
-    flush_thread.join();
+  }
 
-    for (int t = 0; t < kWriters; ++t) {
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), static_cast<SequenceNumber>(kThreads * kPutsPerThread));
+}
+
+TEST_F(DBTest, FlushDuringConcurrentWrites) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 32 * 1024;
+  ASSERT_TRUE(Open(opts).ok());
+
+  std::atomic<bool> stop{false};
+  constexpr int kWriters = 4;
+  constexpr int kPutsPerWriter = 500;
+  std::vector<std::thread> writers;
+  writers.reserve(kWriters);
+
+  for (int t = 0; t < kWriters; ++t) {
+    writers.emplace_back([this, t] {
       for (int i = 0; i < kPutsPerWriter; ++i) {
         std::string key = "fl_th_" + std::to_string(t) + "_k_" + std::to_string(i);
         std::string val = "fl_val_" + std::to_string(i);
-        EXPECT_EQ(Get(key), val);
+        Status s = Put(key, val);
+        EXPECT_TRUE(s.ok());
       }
-    }
+    });
   }
 
-  TEST_F(DBTest, SyncThroughputTiming) {
-    auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
-    GroupCommitTestEnv* env_ptr = test_env.get();
-    custom_env_ = std::move(test_env);
-
-    Options opts;
-    opts.create_if_missing = true;
-    opts.env = env_ptr;
-    ASSERT_TRUE(Open(opts).ok());
-
-    env_ptr->reset_wal_sync_count();
-
-    constexpr int kThreads = 8;
-    constexpr int kPutsPerThread = 250;
-    std::vector<std::thread> threads;
-    threads.reserve(kThreads);
-
-    auto start = std::chrono::steady_clock::now();
-
-    for (int t = 0; t < kThreads; ++t) {
-      threads.emplace_back([this, t] {
-        WriteOptions wo;
-        wo.sync = true;
-        for (int i = 0; i < kPutsPerThread; ++i) {
-          std::string key = "th_" + std::to_string(t) + "_k_" + std::to_string(i);
-          std::string val = "val_" + std::to_string(i);
-          Status s = Put(key, val, wo);
-          ASSERT_TRUE(s.ok());
-        }
-      });
+  std::thread flush_thread([this, &stop] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      (void)db_->Flush();
+      std::this_thread::yield();
     }
+  });
 
-    for (auto& t : threads) {
-      t.join();
-    }
-
-    auto end = std::chrono::steady_clock::now();
-    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    int total_syncs = env_ptr->wal_sync_count();
-    double writes_per_sec =
-        (kThreads * kPutsPerThread * 1000.0) / (duration_ms > 0 ? duration_ms : 1);
-
-    std::cout << "\n=== GROUP COMMIT TIMING ===" << std::endl;
-    std::cout << "Duration: " << duration_ms << " ms" << std::endl;
-    std::cout << "Total syncs: " << total_syncs << " for " << (kThreads * kPutsPerThread)
-              << " writes" << std::endl;
-    std::cout << "Writes/sec: " << writes_per_sec << std::endl;
-    std::cout << "===========================\n" << std::endl;
+  for (auto& t : writers) {
+    t.join();
   }
+  stop.store(true, std::memory_order_relaxed);
+  flush_thread.join();
+
+  for (int t = 0; t < kWriters; ++t) {
+    for (int i = 0; i < kPutsPerWriter; ++i) {
+      std::string key = "fl_th_" + std::to_string(t) + "_k_" + std::to_string(i);
+      std::string val = "fl_val_" + std::to_string(i);
+      EXPECT_EQ(Get(key), val);
+    }
+  }
+}
+
+TEST_F(DBTest, SyncThroughputTiming) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  ASSERT_TRUE(Open(opts).ok());
+
+  env_ptr->reset_wal_sync_count();
+
+  constexpr int kThreads = 8;
+  constexpr int kPutsPerThread = 250;
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+
+  auto start = std::chrono::steady_clock::now();
+
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([this, t] {
+      WriteOptions wo;
+      wo.sync = true;
+      for (int i = 0; i < kPutsPerThread; ++i) {
+        std::string key = "th_" + std::to_string(t) + "_k_" + std::to_string(i);
+        std::string val = "val_" + std::to_string(i);
+        Status s = Put(key, val, wo);
+        ASSERT_TRUE(s.ok());
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  auto end = std::chrono::steady_clock::now();
+  auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+  int total_syncs = env_ptr->wal_sync_count();
+  double writes_per_sec =
+      (kThreads * kPutsPerThread * 1000.0) / (duration_ms > 0 ? duration_ms : 1);
+
+  std::cout << "\n=== GROUP COMMIT TIMING ===" << std::endl;
+  std::cout << "Duration: " << duration_ms << " ms" << std::endl;
+  std::cout << "Total syncs: " << total_syncs << " for " << (kThreads * kPutsPerThread) << " writes"
+            << std::endl;
+  std::cout << "Writes/sec: " << writes_per_sec << std::endl;
+  std::cout << "===========================\n" << std::endl;
+}
 
 }  // namespace
 }  // namespace strata
