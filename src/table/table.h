@@ -14,9 +14,12 @@
 #include "table/block.h"
 #include "table/format.h"
 #include "util/bloom.h"
+#include "util/cache.h"
 #include "util/comparator.h"
 
 namespace strata {
+
+using BlockCache = ShardedLRUCache<Block>;
 
 // A read-only SSTable. After Open(), the index block and the bloom filter are
 // held in memory; each lookup reads at most one data block from the file.
@@ -30,9 +33,11 @@ class Table {
   // outlive the table. Returns Corruption if the footer or index block is bad.
   // A missing or damaged filter is not an error: the table is simply read
   // without one, because the filter only ever saves reads.
+  // `block_cache` is nullable; if provided, uncompressed data blocks are
+  // cached in it.
   static Status Open(const Options& options, const Comparator* comparator,
                      std::unique_ptr<RandomAccessFile> file, uint64_t file_size,
-                     std::unique_ptr<Table>* table);
+                     std::unique_ptr<Table>* table, BlockCache* block_cache = nullptr);
 
   Table(const Table&) = delete;
   Table& operator=(const Table&) = delete;
@@ -40,6 +45,7 @@ class Table {
 
   // Iterates over every entry (internal key -> value). The table must outlive
   // the iterator. Errors reading data blocks are reported by status().
+  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) const;
   std::unique_ptr<Iterator> NewIterator() const;
 
   // Point lookup for the read path. Finds the first entry whose internal key
@@ -49,6 +55,8 @@ class Table {
   // entry exists. When *found is true the entry may still belong to a
   // different (larger) user key, or be a tombstone: the caller checks the user
   // key and the type, exactly as MemTable::Get does.
+  Status InternalGet(const ReadOptions& options, std::string_view internal_key, bool* found,
+                     std::string* key, std::string* value) const;
   Status InternalGet(std::string_view internal_key, bool* found, std::string* key,
                      std::string* value) const;
 
@@ -57,14 +65,15 @@ class Table {
 
  private:
   Table(const Comparator* comparator, std::unique_ptr<RandomAccessFile> file, uint64_t file_size,
-        std::unique_ptr<Block> index_block);
+        std::unique_ptr<Block> index_block, BlockCache* block_cache, uint64_t cache_id);
 
   // Loads the bloom filter named in the metaindex block, if there is a usable one.
   void ReadFilter(const BlockHandle& metaindex_handle);
 
   // Reads the data block named by an index value and returns an iterator that
   // owns it, or an error iterator.
-  std::unique_ptr<Iterator> BlockReader(std::string_view index_value) const;
+  std::unique_ptr<Iterator> BlockReader(const ReadOptions& options,
+                                        std::string_view index_value) const;
 
   const Comparator* const comparator_;
   const std::unique_ptr<RandomAccessFile> file_;
@@ -72,6 +81,8 @@ class Table {
   const std::unique_ptr<Block> index_block_;
   BloomFilterPolicy filter_policy_;    // used only to read; k comes from the filter
   std::optional<std::string> filter_;  // the filter block, if usable
+  BlockCache* const block_cache_;
+  const uint64_t cache_id_;
 };
 
 }  // namespace strata

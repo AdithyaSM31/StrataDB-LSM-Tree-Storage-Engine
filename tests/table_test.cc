@@ -131,12 +131,12 @@ std::string BuildTable(const Options& options, const std::vector<Entry>& entries
 
 // Opens `contents`; *source is left pointing at the file so reads can be counted.
 Status OpenTable(const Options& options, const std::string& contents, std::unique_ptr<Table>* table,
-                 StringSource** source = nullptr) {
+                 StringSource** source = nullptr, BlockCache* block_cache = nullptr) {
   auto file = std::make_unique<StringSource>(contents);
   if (source != nullptr) {
     *source = file.get();
   }
-  return Table::Open(options, &kIcmp, std::move(file), contents.size(), table);
+  return Table::Open(options, &kIcmp, std::move(file), contents.size(), table, block_cache);
 }
 
 // The index of the first entry >= target, as InternalGet and Seek must find it.
@@ -500,6 +500,65 @@ TEST(TableTest, ConcurrentLookups) {
   for (std::thread& th : threads) {
     th.join();
   }
+}
+
+TEST(TableTest, SecondReadIsFreeWithBlockCache) {
+  Random rnd(1234);
+  const std::vector<Entry> entries = RandomEntries(&rnd, 500);
+  const Options options = TableOptions(256);
+  const std::string contents = BuildTable(options, entries);
+
+  BlockCache cache(1024 * 1024);
+  StringSource* source = nullptr;
+  std::unique_ptr<Table> table;
+  ASSERT_TRUE(OpenTable(options, contents, &table, &source, &cache).ok());
+  ASSERT_NE(source, nullptr);
+
+  const std::string target_key = entries[50].key;
+  bool found = false;
+  std::string k;
+  std::string v;
+
+  // 1. Read with fill_cache = false. Reads from disk, cache does not grow.
+  source->ResetReads();
+  ReadOptions no_cache_opts;
+  no_cache_opts.fill_cache = false;
+  EXPECT_TRUE(table->InternalGet(no_cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_EQ(v, entries[50].value);
+  EXPECT_GT(source->reads(), 0);
+  EXPECT_EQ(cache.TotalCharge(), 0u);
+  EXPECT_EQ(cache.hits(), 0u);
+  EXPECT_EQ(cache.misses(), 1u);
+
+  // Read again with fill_cache = false. Reads from disk again and cache still doesn't grow.
+  source->ResetReads();
+  EXPECT_TRUE(table->InternalGet(no_cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_EQ(v, entries[50].value);
+  EXPECT_GT(source->reads(), 0);
+  EXPECT_EQ(cache.TotalCharge(), 0u);
+  EXPECT_EQ(cache.misses(), 2u);
+
+  // 2. Read with fill_cache = true. Cache miss, block is read and inserted.
+  source->ResetReads();
+  ReadOptions cache_opts;
+  cache_opts.fill_cache = true;
+  EXPECT_TRUE(table->InternalGet(cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_GT(source->reads(), 0);
+  EXPECT_GT(cache.TotalCharge(), 0u);
+  EXPECT_EQ(cache.misses(), 3u);
+  EXPECT_EQ(cache.hits(), 0u);
+
+  // 3. Second read of same key. Cache hit! Exactly zero file reads!
+  source->ResetReads();
+  EXPECT_TRUE(table->InternalGet(cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_EQ(v, entries[50].value);
+  EXPECT_EQ(source->reads(), 0);
+  EXPECT_EQ(cache.misses(), 3u);
+  EXPECT_EQ(cache.hits(), 1u);
 }
 
 }  // namespace
