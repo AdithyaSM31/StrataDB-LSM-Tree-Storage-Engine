@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -112,7 +111,73 @@ std::string BuildTableString(const Options& options, const std::vector<Entry>& e
 
 void FlipBit(std::string* s, size_t pos, int bit) {
   ASSERT_LT(pos, s->size());
-  (*s)[pos] ^= static_cast<char>(1 << bit);
+  (*s)[pos] = static_cast<char>((*s)[pos] ^ (1 << bit));
+}
+
+// The whole table must read back exactly, or the reads must report Corruption.
+// A key that silently goes missing is as wrong as a bad value.
+void ExpectExactOrCorruption(const Table& table, const std::vector<Entry>& entries,
+                             size_t flipped_offset) {
+  for (const auto& entry : entries) {
+    bool found = false;
+    std::string found_k;
+    std::string found_v;
+    Status s = table.InternalGet(ReadOptions(), entry.key, &found, &found_k, &found_v);
+    if (!s.ok()) {
+      EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+      continue;
+    }
+    EXPECT_TRUE(found) << "Key went missing, offset " << flipped_offset;
+    if (found) {
+      EXPECT_EQ(found_k, entry.key) << "Offset " << flipped_offset;
+      EXPECT_EQ(found_v, entry.value) << "Offset " << flipped_offset;
+    }
+  }
+
+  std::unique_ptr<Iterator> it = table.NewIterator(ReadOptions());
+  std::vector<Entry> scanned;
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    scanned.push_back({std::string(it->key()), std::string(it->value())});
+  }
+  if (!it->status().ok()) {
+    EXPECT_TRUE(it->status().IsCorruption()) << it->status().ToString();
+    return;
+  }
+  ASSERT_EQ(scanned.size(), entries.size()) << "Scan came up short, offset " << flipped_offset;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    EXPECT_EQ(scanned[i].key, entries[i].key) << "Offset " << flipped_offset;
+    EXPECT_EQ(scanned[i].value, entries[i].value) << "Offset " << flipped_offset;
+  }
+}
+
+Status ReadWholeFile(const std::string& path, std::string* contents) {
+  contents->clear();
+  std::unique_ptr<SequentialFile> file;
+  Status s = Env::Default()->NewSequentialFile(path, &file);
+  if (!s.ok()) {
+    return s;
+  }
+  char buf[8192];
+  while (true) {
+    std::string_view piece;
+    s = file->Read(sizeof(buf), &piece, buf);
+    if (!s.ok() || piece.empty()) {
+      return s;
+    }
+    contents->append(piece);
+  }
+}
+
+Status WriteWholeFile(const std::string& path, const std::string& contents) {
+  std::unique_ptr<WritableFile> file;
+  Status s = Env::Default()->NewWritableFile(path, &file);
+  if (s.ok()) {
+    s = file->Append(contents);
+  }
+  if (s.ok()) {
+    s = file->Close();
+  }
+  return s;
 }
 
 TEST(SSTableCorruptionTest, FooterMagicNumberBitFlipFailsOpen) {
@@ -138,26 +203,66 @@ TEST(SSTableCorruptionTest, FooterMagicNumberBitFlipFailsOpen) {
   }
 }
 
-TEST(SSTableCorruptionTest, FooterHandlesBitFlipFailsOpen) {
+TEST(SSTableCorruptionTest, FooterHandleBitFlipsNeverReturnWrongData) {
   const auto entries = GenerateEntries(50);
   const Options options = SSTOptions();
   const std::string original = BuildTableString(options, entries);
   ASSERT_GE(original.size(), Footer::kEncodedLength);
 
-  // Footer block handles occupy the first 2 * BlockHandle::kMaxEncodedLength bytes of the footer.
+  // The handles come first in the footer; a bad one points at the wrong bytes.
   const size_t footer_start = original.size() - Footer::kEncodedLength;
-  for (size_t byte_idx = footer_start; byte_idx < footer_start + 20; byte_idx += 2) {
+  for (size_t byte_idx = footer_start; byte_idx < footer_start + 40; ++byte_idx) {
     std::string corrupted = original;
     FlipBit(&corrupted, byte_idx, 0);
 
     std::unique_ptr<Table> table;
     auto file = std::make_unique<StringSource>(corrupted);
     Status s = Table::Open(options, &kIcmp, std::move(file), corrupted.size(), &table);
-
-    // Either Open fails with corruption or opening succeeds but subsequent block reads fail.
     if (!s.ok()) {
       EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+      continue;
     }
+    ExpectExactOrCorruption(*table, entries, byte_idx);
+  }
+}
+
+TEST(SSTableCorruptionTest, EveryBitFlipIsDetectedOrHarmless) {
+  const auto entries = GenerateEntries(60);
+  const Options options = SSTOptions(256);
+  const std::string original = BuildTableString(options, entries);
+
+  for (size_t offset = 0; offset < original.size(); ++offset) {
+    for (int bit = 0; bit < 8; ++bit) {
+      std::string corrupted = original;
+      FlipBit(&corrupted, offset, bit);
+
+      std::unique_ptr<Table> table;
+      auto file = std::make_unique<StringSource>(corrupted);
+      Status s = Table::Open(options, &kIcmp, std::move(file), corrupted.size(), &table);
+      if (!s.ok()) {
+        EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+        continue;
+      }
+      ExpectExactOrCorruption(*table, entries, offset);
+      if (::testing::Test::HasFailure()) {
+        return;  // one offset's failures are enough to read
+      }
+    }
+  }
+}
+
+TEST(SSTableCorruptionTest, TruncatedTableFailsToOpen) {
+  const auto entries = GenerateEntries(50);
+  const Options options = SSTOptions();
+  const std::string original = BuildTableString(options, entries);
+
+  // Cut every length: the footer no longer sits where the size says it does.
+  for (size_t size = 0; size < original.size(); ++size) {
+    std::string cut = original.substr(0, size);
+    std::unique_ptr<Table> table;
+    auto file = std::make_unique<StringSource>(cut);
+    Status s = Table::Open(options, &kIcmp, std::move(file), cut.size(), &table);
+    EXPECT_TRUE(s.IsCorruption()) << "Size " << size << ": " << s.ToString();
   }
 }
 
@@ -181,23 +286,7 @@ TEST(SSTableCorruptionTest, DataBlockBitFlipsNeverReturnWrongData) {
         continue;
       }
 
-      // Check all entries: InternalGet must return either the exact correct value or Corruption.
-      // It must NEVER return a corrupted/wrong value!
-      for (const auto& entry : entries) {
-        bool found = false;
-        std::string found_k;
-        std::string found_v;
-        ReadOptions ropts;
-        Status s = table->InternalGet(ropts, entry.key, &found, &found_k, &found_v);
-        if (s.ok() && found) {
-          EXPECT_EQ(found_v, entry.value)
-              << "Corruption silent payload mutation detected at offset " << offset;
-          EXPECT_EQ(found_k, entry.key);
-        } else if (!s.ok()) {
-          EXPECT_TRUE(s.IsCorruption())
-              << "Non-corruption error returned on bit flip: " << s.ToString();
-        }
-      }
+      ExpectExactOrCorruption(*table, entries, offset);
     }
   }
 }
@@ -286,22 +375,14 @@ TEST_F(DBTableCorruptionTest, CorruptedSSTableReportsCorruptionNeverWrongData) {
 
   // 3. Read SST file and flip bits in a data block
   std::string sst_data;
-  {
-    std::ifstream in(sst_path, std::ios::binary);
-    ASSERT_TRUE(in.is_open());
-    sst_data.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  }
+  ASSERT_TRUE(ReadWholeFile(sst_path, &sst_data).ok());
   ASSERT_GE(sst_data.size(), 128u);
 
   // Flip bit in the data block
   FlipBit(&sst_data, 50, 2);
 
   // Write corrupted data back to SST file
-  {
-    std::ofstream out(sst_path, std::ios::binary | std::ios::trunc);
-    ASSERT_TRUE(out.is_open());
-    out.write(sst_data.data(), static_cast<std::streamsize>(sst_data.size()));
-  }
+  ASSERT_TRUE(WriteWholeFile(sst_path, sst_data).ok());
 
   // 4. Reopen DB
   opts.create_if_missing = false;
@@ -333,6 +414,43 @@ TEST_F(DBTableCorruptionTest, CorruptedSSTableReportsCorruptionNeverWrongData) {
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
   }
   EXPECT_TRUE(it->status().IsCorruption()) << it->status().ToString();
+}
+
+TEST_F(DBTableCorruptionTest, CompactionOverCorruptedTableFailsAndKeepsIt) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.block_size = 512;
+  {
+    std::unique_ptr<DB> db;
+    ASSERT_TRUE(DB::Open(opts, test_dir_, &db).ok());
+    for (int round = 0; round < 2; ++round) {
+      for (int i = 0; i < 100; ++i) {
+        char k[32];
+        std::snprintf(k, sizeof(k), "k_%04d", i);
+        ASSERT_TRUE(db->Put(WriteOptions(), k, std::string(100, 'v')).ok());
+      }
+      ASSERT_TRUE(db->Flush().ok());
+    }
+  }
+
+  std::string sst_path;
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().extension() == ".sst") {
+      sst_path = entry.path().string();
+    }
+  }
+  ASSERT_FALSE(sst_path.empty());
+  std::string sst_data;
+  ASSERT_TRUE(ReadWholeFile(sst_path, &sst_data).ok());
+  FlipBit(&sst_data, 50, 2);
+  ASSERT_TRUE(WriteWholeFile(sst_path, sst_data).ok());
+
+  std::unique_ptr<DB> db;
+  ASSERT_TRUE(DB::Open(opts, test_dir_, &db).ok());
+  Status s = db->CompactRange("a", "z");
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_TRUE(db->Put(WriteOptions(), "x", "y").IsCorruption()) << "the error must be sticky";
+  EXPECT_TRUE(std::filesystem::exists(sst_path)) << "the only copy of that data";
 }
 
 }  // namespace

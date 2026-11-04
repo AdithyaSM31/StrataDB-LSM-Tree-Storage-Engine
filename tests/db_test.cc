@@ -738,52 +738,130 @@ TEST_F(DBTest, FutureMethodsReturnNotSupported) {
   EXPECT_NE(prop.find("Write amplification"), std::string::npos);
 }
 
-TEST_F(DBTest, StrataStatsPropertyReportsFilesBytesCompactionAndWriteAmp) {
+namespace {
+
+// Reads the number after `label` out of strata.stats.
+double StatValue(DB* db, const std::string& label) {
+  std::string stats;
+  EXPECT_TRUE(db->GetProperty("strata.stats", &stats));
+  const auto pos = stats.find(label);
+  EXPECT_NE(pos, std::string::npos) << label << " in:" << stats;
+  return pos == std::string::npos ? -1.0 : std::stod(stats.substr(pos + label.size()));
+}
+
+}  // namespace
+
+TEST_F(DBTest, StrataStatsReportsFlushAndCompactionBytes) {
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 64 * 1024;
+  opts.write_buffer_size = size_t{64} * 1024;
   ASSERT_TRUE(Open(opts).ok());
 
-  // Initially: empty db stats
-  std::string stats;
-  ASSERT_TRUE(db_->GetProperty("strata.stats", &stats));
-  EXPECT_NE(stats.find("Total files: 0"), std::string::npos);
-  EXPECT_NE(stats.find("Write amplification: 0.00"), std::string::npos);
+  EXPECT_EQ(StatValue(db_.get(), "Total files: "), 0.0);
+  EXPECT_EQ(StatValue(db_.get(), "Flush count: "), 0.0);
+  EXPECT_EQ(StatValue(db_.get(), "Write amplification: "), 0.0);
 
-  // Write enough data to flush multiple L0 files
-  for (int i = 0; i < 200; ++i) {
-    char k[32];
-    char v[128];
-    std::snprintf(k, sizeof(k), "key_%04d", i);
-    std::snprintf(v, sizeof(v), "val_%04d_payload_bytes_for_stats_test", i);
-    ASSERT_TRUE(Put(k, v).ok());
+  // Two rounds over the same keys, so the compaction below really rewrites data.
+  const std::string value(1024, 'v');
+  for (int round = 0; round < 2; ++round) {
+    for (int i = 0; i < 1000; ++i) {
+      char k[32];
+      std::snprintf(k, sizeof(k), "key_%04d", i);
+      ASSERT_TRUE(Put(k, value).ok());
+    }
+    ASSERT_TRUE(db_->Flush().ok());
   }
-  ASSERT_TRUE(db_->Flush().ok());
 
-  ASSERT_TRUE(db_->GetProperty("strata.stats", &stats));
-  EXPECT_NE(stats.find("Total files:"), std::string::npos);
-  EXPECT_NE(stats.find("Flush count:"), std::string::npos);
-  EXPECT_NE(stats.find("Write amplification:"), std::string::npos);
+  const double user_mb = StatValue(db_.get(), "User bytes written: ");
+  const double expected_user_mb = 2000.0 * 1024 / 1048576.0;
+  EXPECT_GE(user_mb, expected_user_mb);
+  EXPECT_LE(user_mb, expected_user_mb * 1.05) << "only small per-record overhead";
+  EXPECT_GE(StatValue(db_.get(), "Flush count: "), 2.0);
 
-  // Test per-level file count property
+  ASSERT_TRUE(db_->CompactRange("a", "z").ok());
+
+  EXPECT_GE(StatValue(db_.get(), "Compaction count: "), 1.0);
+  const double read_mb = StatValue(db_.get(), "Compaction read: ");
+  const double written_mb = StatValue(db_.get(), ", write: ");
+  EXPECT_GT(read_mb, 0.0);
+  EXPECT_GT(written_mb, 0.0);
+
+  const double sst_mb = StatValue(db_.get(), "SSTable bytes written: ");
+  EXPECT_GT(sst_mb, written_mb) << "flushed bytes count too";
+  const double write_amp = StatValue(db_.get(), "Write amplification: ");
+  EXPECT_NEAR(write_amp, sst_mb / user_mb, 0.01);
+
   std::string l0_files;
   ASSERT_TRUE(db_->GetProperty("strata.num-files-at-level0", &l0_files));
-  EXPECT_FALSE(l0_files.empty());
-  EXPECT_NE(l0_files, "0");
-
-  std::string l1_files;
-  ASSERT_TRUE(db_->GetProperty("strata.num-files-at-level1", &l1_files));
-  EXPECT_EQ(l1_files, "0");
-
-  // Run compaction to level 1
-  ASSERT_TRUE(db_->CompactRange("a", "z").ok());
-  ASSERT_TRUE(db_->GetProperty("strata.stats", &stats));
-  EXPECT_NE(stats.find("Compaction count:"), std::string::npos);
-
-  // Invalid properties
+  EXPECT_EQ(l0_files, "0");
   std::string dummy;
   EXPECT_FALSE(db_->GetProperty("strata.unknown_property", &dummy));
   EXPECT_FALSE(db_->GetProperty("strata.num-files-at-level99", &dummy));
+}
+
+TEST_F(DBTest, StrataStatsDoesNotCountTrivialMovesAsWrites) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+  auto* impl = static_cast<DBImpl*>(db_.get());
+
+  // Flushes with disjoint keys: L0 compactions just move these files down.
+  for (int file = 0; file < 6; ++file) {
+    char k[32];
+    std::snprintf(k, sizeof(k), "key_%d", file);
+    ASSERT_TRUE(Put(k, std::string(4096, 'v')).ok());
+    ASSERT_TRUE(db_->Flush().ok());
+  }
+  for (int i = 0; i < 1000 && StatValue(db_.get(), "Compaction count: ") < 1.0; ++i) {
+    Env::Default()->SleepForMicroseconds(10000);
+  }
+  ASSERT_GE(StatValue(db_.get(), "Compaction count: "), 1.0);
+  EXPECT_GT(impl->TEST_NumLevelFiles(1), 0);
+
+  EXPECT_EQ(StatValue(db_.get(), ", write: "), 0.0) << "a move writes no bytes";
+  EXPECT_EQ(StatValue(db_.get(), "SSTable bytes written: "), StatValue(db_.get(), "Total size: "));
+}
+
+TEST_F(DBTest, OpenFailsWhenAListedTableIsMissing) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+  ASSERT_TRUE(Put("k", "v").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  Close();
+
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().extension() == ".sst") {
+      std::filesystem::remove(entry.path());
+    }
+  }
+  Status s = Open(opts);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+}
+
+TEST_F(DBTest, TableLostWhileOpenIsNotReportedAsAMissingKey) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+  ASSERT_TRUE(Put("k", "v").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  Close();
+  ASSERT_TRUE(Open(opts).ok());  // the table cache is empty again
+
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().extension() == ".sst") {
+      std::filesystem::remove(entry.path());
+    }
+  }
+
+  std::string value;
+  Status s = db_->Get(ReadOptions(), "k", &value);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+
+  std::unique_ptr<Iterator> it = db_->NewIterator(ReadOptions());
+  it->SeekToFirst();
+  EXPECT_FALSE(it->Valid());
+  EXPECT_TRUE(it->status().IsCorruption()) << it->status().ToString();
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,13 +1374,13 @@ TEST_F(DBTest, StickyMemTableSwitchError) {
   auto flaky_env = std::make_unique<FailingLogEnv>(Env::Default());
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 64 * 1024;  // 64 KB
+  opts.write_buffer_size = size_t{64} * 1024;  // 64 KB
   opts.env = flaky_env.get();
 
   ASSERT_TRUE(Open(opts).ok());
 
   // Write a large value to fill memtable beyond write_buffer_size
-  std::string big_val(70 * 1024, 'x');
+  std::string big_val(size_t{70} * 1024, 'x');
   ASSERT_TRUE(Put("k_big", big_val).ok());
 
   // Fail creating the next log file

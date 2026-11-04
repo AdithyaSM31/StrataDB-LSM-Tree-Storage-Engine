@@ -129,7 +129,7 @@ class DBImpl : public DB {
   // queue like any writer and, once it leads, force a memtable switch.
   Status WriteImpl(const WriteOptions& opts, WriteBatch* batch);
   WriteBatch* BuildBatchGroup(Writer** last_writer);
-  Status SwitchMemTable();
+  Status SwitchMemTable(std::unique_lock<std::mutex>* lock);
   void BackgroundThreadMain();
   bool HasBackgroundWork() const;
   void CompactMemTable();

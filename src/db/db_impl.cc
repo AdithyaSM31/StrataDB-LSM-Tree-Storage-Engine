@@ -238,6 +238,8 @@ Status DBImpl::Recover() {
     return s;
   }
   logs.clear();
+  std::set<uint64_t> missing_tables;
+  versions_->AddLiveFiles(&missing_tables);
   for (const auto& filename : filenames) {
     uint64_t number = 0;
     FileType type;
@@ -245,8 +247,14 @@ Status DBImpl::Recover() {
       versions_->MarkFileNumberUsed(number);
       if (type == FileType::kLogFile) {
         logs.push_back(number);
+      } else if (type == FileType::kTableFile) {
+        missing_tables.erase(number);
       }
     }
+  }
+  if (!missing_tables.empty()) {
+    return Status::Corruption(std::to_string(missing_tables.size()) + " missing table files, e.g.",
+                              TableFileName(dbname_, *missing_tables.begin()));
   }
 
   // Replay only logs numbered at or above versions_->LogNumber()
@@ -408,13 +416,22 @@ Status DBImpl::RecoverLogFile(uint64_t number, SequenceNumber* max_sequence, boo
   return Status::OK();
 }
 
-Status DBImpl::SwitchMemTable() {
+Status DBImpl::SwitchMemTable(std::unique_lock<std::mutex>* lock) {
   const uint64_t new_number = versions_->NewFileNumber();
   const std::string log_fname = LogFileName(dbname_, new_number);
   std::unique_ptr<WritableFile> new_logfile;
   Status s = env_->NewWritableFile(log_fname, &new_logfile);
   if (!s.ok()) {
     versions_->ReuseFileNumber(new_number);
+    return s;
+  }
+  // A synced write to this log is only durable if the log's directory entry is.
+  // Only the queue leader switches memtables, so nothing below can change while
+  // the lock is dropped, and readers don't wait for the fsync.
+  lock->unlock();
+  s = env_->SyncDir(dbname_);
+  lock->lock();
+  if (!s.ok()) {
     return s;
   }
   log_.reset();
@@ -468,7 +485,7 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force) 
       background_work_cv_.wait(*lock);
       continue;
     }
-    Status s = SwitchMemTable();
+    Status s = SwitchMemTable(lock);
     if (!s.ok()) {
       RecordBackgroundError(s);
       return s;
@@ -514,9 +531,15 @@ void DBImpl::BackgroundThreadMain() {
         CompactionState compact(c.get(), SmallestSnapshot(), /*manual=*/true);
         // A failure is recorded in bg_error_, which CompactRange returns.
         (void)DoCompactionWork(&compact, &lock);
-        m->done = true;
+        // A background error can release the caller during the compaction. It
+        // clears manual_compaction_ as it goes, and `m` went with its stack frame.
+        if (manual_compaction_ == m) {
+          m->done = true;
+        }
       }
-      manual_compaction_ = nullptr;
+      if (manual_compaction_ == m) {
+        manual_compaction_ = nullptr;
+      }
       background_work_cv_.notify_all();
       continue;
     }
@@ -577,6 +600,13 @@ void DBImpl::CompactMemTable() {
 }
 
 void DBImpl::RemoveObsoleteFiles() {
+  // After a background error the MANIFEST may hold an edit this process never
+  // applied, so a file that looks obsolete here may be live after the next Open.
+  // That Open cleans up instead, once it knows which version won.
+  if (!bg_error_.ok()) {
+    return;
+  }
+
   std::set<uint64_t> live_tables = pending_outputs_;
   versions_->AddLiveFiles(&live_tables);
 
@@ -1106,10 +1136,8 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
     if (!s.ok()) {
       RecordBackgroundError(s);
     } else {
-      const int lvl = compact->compaction->level();
-      compaction_stats_[lvl].count++;
-      compaction_stats_[lvl].bytes_read += f->file_size;
-      compaction_stats_[lvl].bytes_written += f->file_size;
+      // Only metadata changed: no table bytes were read or written.
+      compaction_stats_[compact->compaction->level()].count++;
     }
     compact->compaction->ReleaseInputVersion();
     RemoveObsoleteFiles();
@@ -1221,6 +1249,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
     status = Status::IOError("compaction aborted by shutdown");
   }
 
+  const bool install_attempted = status.ok();
   if (status.ok()) {
     status = InstallCompactionResults(compact);
   }
@@ -1235,11 +1264,15 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
   compact->compaction->ReleaseInputVersion();
 
   if (!status.ok()) {
-    if (!shutting_down_.load(std::memory_order_acquire)) {
+    if (install_attempted || !shutting_down_.load(std::memory_order_acquire)) {
       RecordBackgroundError(status);
     }
-    for (const auto& out : compact->outputs) {
-      (void)env_->RemoveFile(TableFileName(dbname_, out.number));
+    // A failed install may still have reached the MANIFEST, so keep its outputs:
+    // the next Open deletes them if they turn out not to be listed.
+    if (!install_attempted) {
+      for (const auto& out : compact->outputs) {
+        (void)env_->RemoveFile(TableFileName(dbname_, out.number));
+      }
     }
   } else {
     const int lvl = compact->compaction->level();
@@ -1279,7 +1312,7 @@ bool DBImpl::GetProperty(std::string_view name, std::string* value) {
     return false;
   }
   if (name == "strata.stats") {
-    char buf[256];
+    char buf[512];
     std::string s;
     s.reserve(1024);
     s.append("                               Compactions\n");
@@ -1331,6 +1364,7 @@ bool DBImpl::GetProperty(std::string_view name, std::string* value) {
     std::snprintf(buf, sizeof(buf),
                   "Total files: %llu, Total size: %.2f MB\n"
                   "Flush count: %llu, Compaction count: %llu\n"
+                  "Compaction read: %.2f MB, write: %.2f MB\n"
                   "User bytes written: %.2f MB\n"
                   "SSTable bytes written: %.2f MB\n"
                   "Write amplification: %.2f\n",
@@ -1338,6 +1372,8 @@ bool DBImpl::GetProperty(std::string_view name, std::string* value) {
                   static_cast<double>(total_size) / 1048576.0,
                   static_cast<unsigned long long>(flush_count_),
                   static_cast<unsigned long long>(total_compaction_count),
+                  static_cast<double>(total_compaction_read) / 1048576.0,
+                  static_cast<double>(total_compaction_written) / 1048576.0,
                   static_cast<double>(user_bytes_written_) / 1048576.0,
                   static_cast<double>(total_sstable_written) / 1048576.0, write_amp);
     s.append(buf);

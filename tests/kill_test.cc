@@ -1,16 +1,21 @@
-#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <random>
+#include <set>
 #include <string>
-#include <vector>
 
+#include "crash_model.h"
 #include "strata/db.h"
 #include "strata/env.h"
 #include "strata/options.h"
@@ -19,17 +24,12 @@
 namespace strata {
 namespace {
 
-std::string KeyStr(uint64_t i) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "k_%08lu", static_cast<unsigned long>(i));
-  return std::string(buf);
-}
-
-std::string ValStr(uint64_t i) {
-  char buf[64];
-  std::snprintf(buf, sizeof(buf), "v_kill_test_payload_%08lu", static_cast<unsigned long>(i));
-  return std::string(buf);
-}
+// What the child reports over the pipe after each synced write.
+struct Progress {
+  uint64_t durable;      // this write, and all before it, are confirmed durable
+  uint64_t flushes;      // finished by this child so far
+  uint64_t compactions;  // finished by this child so far
+};
 
 bool ReadExact(int fd, void* buf, size_t n) {
   char* ptr = static_cast<char*>(buf);
@@ -48,6 +48,28 @@ bool ReadExact(int fd, void* buf, size_t n) {
     n -= static_cast<size_t>(r);
   }
   return true;
+}
+
+uint64_t Stat(const std::string& stats, const std::string& label) {
+  const auto pos = stats.find(label);
+  return pos == std::string::npos ? 0 : std::stoull(stats.substr(pos + label.size()));
+}
+
+constexpr int kDrainLevelZeroTo = 8;
+
+int LevelZeroFiles(DB* db) {
+  std::string files;
+  return db->GetProperty("strata.num-files-at-level0", &files) ? std::stoi(files) : 0;
+}
+
+std::set<std::string> TableFiles(const std::string& dir) {
+  std::set<std::string> tables;
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    if (entry.path().extension() == ".sst") {
+      tables.insert(entry.path().filename().string());
+    }
+  }
+  return tables;
 }
 
 class KillTest : public ::testing::Test {
@@ -72,24 +94,49 @@ class KillTest : public ::testing::Test {
   std::string test_dir_;
 };
 
+// Writes forever, from `seq` on, reporting each synced write. Never returns.
+[[noreturn]] void RunChild(const Options& opts, const std::string& dir,
+                           const CrashWorkload& workload, uint64_t seq, int report_fd) {
+  std::unique_ptr<DB> db;
+  if (!DB::Open(opts, dir, &db).ok()) {
+    _exit(1);
+  }
+  for (;; ++seq) {
+    const bool sync = seq % 8 == 0;
+    if (!workload.Apply(db.get(), seq, sync).ok()) {
+      _exit(2);
+    }
+    if (sync) {
+      std::string stats;
+      db->GetProperty("strata.stats", &stats);
+      const Progress progress{seq, Stat(stats, "Flush count: "), Stat(stats, "Compaction count: ")};
+      if (write(report_fd, &progress, sizeof(progress)) != sizeof(progress)) {
+        _exit(3);
+      }
+    }
+  }
+}
+
 TEST_F(KillTest, ThousandKillIterationsSurviveWithoutDataLoss) {
-  const char* env_iter = std::getenv("STRATA_KILL_ITERATIONS");
+  const char* env_iter = std::getenv("STRATA_KILL_ITERATIONS");  // NOLINT(concurrency-mt-unsafe)
   const int kTotalIterations =
       (env_iter != nullptr && std::atoi(env_iter) > 0) ? std::atoi(env_iter) : 1000;
 
   Options opts;
   opts.create_if_missing = true;
-  opts.write_buffer_size = 64 * 1024;
+  opts.write_buffer_size = size_t{64} * 1024;
 
-  // Initialize the database cleanly once
-  {
-    std::unique_ptr<DB> init_db;
-    ASSERT_TRUE(DB::Open(opts, test_dir_, &init_db).ok());
-    ASSERT_TRUE(init_db->Put(WriteOptions(), KeyStr(0), ValStr(0)).ok());
-  }
+  // Large values against a small buffer keep the child flushing, and few keys
+  // make the files overlap, so its compactions merge instead of moving files.
+  CrashWorkload workload;
+  workload.key_space = 200;
+  workload.value_size = 4096;
+  CrashModel model(workload);
 
-  opts.create_if_missing = false;
-  uint64_t next_key_idx = 1;
+  uint64_t child_flushes = 0;
+  uint64_t child_compactions = 0;
+  int kills_leaving_orphan_tables = 0;
+  std::mt19937 rnd(301);
 
   for (int iter = 0; iter < kTotalIterations; ++iter) {
     int pipe_fds[2];
@@ -99,116 +146,85 @@ TEST_F(KillTest, ThousandKillIterationsSurviveWithoutDataLoss) {
     ASSERT_GE(pid, 0) << "fork failed at iteration " << iter;
 
     if (pid == 0) {
-      // Child process: close read end
       close(pipe_fds[0]);
-
-      std::unique_ptr<DB> child_db;
-      Status s = DB::Open(opts, test_dir_, &child_db);
-      if (!s.ok()) {
-        close(pipe_fds[1]);
-        _exit(1);
-      }
-
-      // Perform a batch of writes, syncing periodically
-      uint64_t cur_key = next_key_idx;
-      while (true) {
-        WriteOptions wopts;
-        const bool sync = (cur_key % 3 == 0);
-        wopts.sync = sync;
-        s = child_db->Put(wopts, KeyStr(cur_key), ValStr(cur_key));
-        if (!s.ok()) {
-          break;
-        }
-        if (sync) {
-          ssize_t bytes_written = write(pipe_fds[1], &cur_key, sizeof(cur_key));
-          (void)bytes_written;
-        }
-        cur_key++;
-      }
-      _exit(0);
+      RunChild(opts, test_dir_, workload, model.applied() + 1, pipe_fds[1]);
     }
 
-    // Parent process: close write end
     close(pipe_fds[1]);
 
-    std::vector<uint64_t> confirmed_syncs;
-
-    // Wait until child has performed at least one synced write
-    uint64_t first_sync = 0;
-    if (ReadExact(pipe_fds[0], &first_sync, sizeof(first_sync))) {
-      confirmed_syncs.push_back(first_sync);
+    // Let the child reach at least one synced write, then kill it at a random moment.
+    uint64_t durable = 0;
+    Progress progress{};
+    if (ReadExact(pipe_fds[0], &progress, sizeof(progress))) {
+      durable = progress.durable;
     }
+    // Mostly short lives, and now and then long enough to finish background work.
+    usleep(iter % 10 == 0 ? 200000 : rnd() % 30000);
 
-    // Add jitter before killing
-    if (iter % 3 != 0) {
-      usleep(50 * (iter % 8));
-    }
-
-    // Send SIGKILL (kill -9)
     ASSERT_EQ(kill(pid, SIGKILL), 0);
 
     int status = 0;
     ASSERT_EQ(waitpid(pid, &status, 0), pid);
-    EXPECT_TRUE(WIFSIGNALED(status));
+    ASSERT_TRUE(WIFSIGNALED(status))
+        << "child exited by itself at iteration " << iter << " with code " << WEXITSTATUS(status);
     EXPECT_EQ(WTERMSIG(status), SIGKILL);
 
-    // Read remaining confirmed synced keys from the child
-    while (true) {
-      uint64_t synced_idx = 0;
-      if (ReadExact(pipe_fds[0], &synced_idx, sizeof(synced_idx))) {
-        confirmed_syncs.push_back(synced_idx);
-      } else {
-        break;
-      }
+    // Everything the child reported before it died was durable when reported.
+    uint64_t flushes = progress.flushes;
+    uint64_t compactions = progress.compactions;
+    while (ReadExact(pipe_fds[0], &progress, sizeof(progress))) {
+      durable = progress.durable;
+      flushes = progress.flushes;
+      compactions = progress.compactions;
     }
     close(pipe_fds[0]);
+    child_flushes += flushes;
+    child_compactions += compactions;
 
-    // Parent opens database and verifies integrity
+    const std::set<std::string> tables_at_kill = TableFiles(test_dir_);
+
     std::unique_ptr<DB> parent_db;
-    opts.create_if_missing = false;
     Status open_status = DB::Open(opts, test_dir_, &parent_db);
     ASSERT_TRUE(open_status.ok()) << "Open failed after kill -9 at iteration " << iter << ": "
                                   << open_status.ToString();
 
-    // Verify all confirmed synced keys exist
-    for (uint64_t k : confirmed_syncs) {
-      std::string val;
-      Status s = parent_db->Get(ReadOptions(), KeyStr(k), &val);
-      ASSERT_TRUE(s.ok()) << "Synced key " << KeyStr(k) << " missing after kill at iter " << iter;
-      EXPECT_EQ(val, ValStr(k));
-    }
-
-    // Verify prefix property: all keys up to highest recovered key must exist
-    uint64_t highest_key = next_key_idx;
-    while (true) {
-      std::string val;
-      Status s = parent_db->Get(ReadOptions(), KeyStr(highest_key), &val);
-      if (s.ok()) {
-        EXPECT_EQ(val, ValStr(highest_key));
-        highest_key++;
-      } else {
+    // Open deletes tables no MANIFEST lists: a kill caught one half-written.
+    // The background compaction Open starts can also delete some, so this is an estimate.
+    const std::set<std::string> tables_after_open = TableFiles(test_dir_);
+    for (const auto& table : tables_at_kill) {
+      if (tables_after_open.count(table) == 0) {
+        ++kills_leaving_orphan_tables;
         break;
       }
     }
 
-    if (!confirmed_syncs.empty()) {
-      EXPECT_GE(highest_key, confirmed_syncs.back() + 1);
+    Status verify = model.Verify(parent_db.get(), durable);
+    ASSERT_TRUE(verify.ok()) << "After kill -9 at iteration " << iter << ": " << verify.ToString();
+
+    // Compactions keep dying with their process, so L0 would grow until writes
+    // stall. Drain it to just under that: the next child then opens with a
+    // compaction to run, and the kill can land in the middle of it.
+    for (int wait = 0; wait < 5000 && LevelZeroFiles(parent_db.get()) >= kDrainLevelZeroTo;
+         ++wait) {
+      usleep(1000);
     }
-
-    next_key_idx = highest_key;
-    parent_db.reset();
   }
 
-  // Final check: reopen one last time and verify entire history
+  std::printf("%d kills: child finished %llu flushes and %llu compactions; %d kills left orphans\n",
+              kTotalIterations, static_cast<unsigned long long>(child_flushes),
+              static_cast<unsigned long long>(child_compactions), kills_leaving_orphan_tables);
+
+  // A shorter run (see STRATA_KILL_ITERATIONS) may not get this far by chance.
+  if (kTotalIterations >= 200) {
+    EXPECT_GT(child_flushes, 0U) << "kills must land while the child is flushing";
+    EXPECT_GT(child_compactions, 0U) << "kills must land while the child is compacting";
+    EXPECT_GT(kills_leaving_orphan_tables, 0) << "some kills must interrupt a table being written";
+  }
+
   std::unique_ptr<DB> final_db;
-  opts.create_if_missing = false;
   ASSERT_TRUE(DB::Open(opts, test_dir_, &final_db).ok());
-  for (uint64_t i = 0; i < next_key_idx; ++i) {
-    std::string val;
-    Status s = final_db->Get(ReadOptions(), KeyStr(i), &val);
-    ASSERT_TRUE(s.ok()) << "Key " << KeyStr(i) << " missing at final verification";
-    EXPECT_EQ(val, ValStr(i));
-  }
+  Status verify = model.Verify(final_db.get(), model.applied());
+  EXPECT_TRUE(verify.ok()) << verify.ToString();
 }
 
 }  // namespace
