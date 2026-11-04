@@ -9,12 +9,14 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
+#include "util/fault_injection_env.h"
 #include "util/random.h"
 
 namespace strata {
@@ -738,6 +740,226 @@ TEST_F(EnvTest, FileWrappersDelegationAndOwnership) {
   ASSERT_TRUE(rnd_wrapper->Read(6, 7, &res, scratch).ok());
   EXPECT_EQ(res, "wrapper");
   rnd_wrapper.reset();
+}
+
+TEST_F(EnvTest, FaultInjectionCrashLosesUnsyncedData) {
+  FaultInjectionEnv f_env(env_);
+  const std::string file_path = Path("fault_test_file.txt");
+
+  std::unique_ptr<WritableFile> wfile;
+  ASSERT_TRUE(f_env.NewWritableFile(file_path, &wfile).ok());
+  ASSERT_TRUE(wfile->Append("synced_prefix").ok());
+  ASSERT_TRUE(wfile->Sync().ok());
+  ASSERT_TRUE(f_env.SyncDir(test_dir_).ok());
+
+  ASSERT_TRUE(wfile->Append("_unsynced_tail").ok());
+  // Do NOT sync the second part
+  ASSERT_TRUE(wfile->Close().ok());
+  wfile.reset();
+
+  // Simulate crash
+  ASSERT_TRUE(f_env.SimulateCrash().ok());
+  f_env.ResumeAfterCrash();
+
+  // Check file contents: must have truncated to synced_prefix
+  std::unique_ptr<SequentialFile> rfile;
+  ASSERT_TRUE(f_env.NewSequentialFile(file_path, &rfile).ok());
+  char scratch[64];
+  std::string_view read_result;
+  ASSERT_TRUE(rfile->Read(64, &read_result, scratch).ok());
+  EXPECT_EQ(read_result, "synced_prefix");
+}
+
+TEST_F(EnvTest, FaultInjectionCrashStopsTheFilesystem) {
+  FaultInjectionEnv f_env(env_);
+  const std::string file_path = Path("stopped.txt");
+
+  std::unique_ptr<WritableFile> wfile;
+  ASSERT_TRUE(f_env.NewWritableFile(file_path, &wfile).ok());
+  ASSERT_TRUE(f_env.SimulateCrash().ok());
+
+  EXPECT_TRUE(wfile->Append("x").IsIOError());
+  std::unique_ptr<WritableFile> other;
+  EXPECT_TRUE(f_env.NewWritableFile(Path("other.txt"), &other).IsIOError());
+  EXPECT_TRUE(f_env.SyncDir(test_dir_).IsIOError());
+
+  f_env.ResumeAfterCrash();
+  EXPECT_TRUE(f_env.NewWritableFile(Path("other.txt"), &other).ok());
+}
+
+TEST_F(EnvTest, FaultInjectionCrashLosesFileWithoutDirectorySync) {
+  FaultInjectionEnv f_env(env_);
+  const std::string synced_path = Path("dir_synced.txt");
+  const std::string unsynced_path = Path("dir_unsynced.txt");
+
+  std::unique_ptr<WritableFile> wfile;
+  ASSERT_TRUE(f_env.NewWritableFile(synced_path, &wfile).ok());
+  ASSERT_TRUE(wfile->Sync().ok());
+  ASSERT_TRUE(f_env.SyncDir(test_dir_).ok());
+
+  // Its data is synced, but nothing has made its directory entry durable.
+  std::unique_ptr<WritableFile> wfile2;
+  ASSERT_TRUE(f_env.NewWritableFile(unsynced_path, &wfile2).ok());
+  ASSERT_TRUE(wfile2->Append("data").ok());
+  ASSERT_TRUE(wfile2->Sync().ok());
+
+  ASSERT_TRUE(f_env.SimulateCrash().ok());
+  f_env.ResumeAfterCrash();
+
+  EXPECT_TRUE(f_env.FileExists(synced_path));
+  EXPECT_FALSE(f_env.FileExists(unsynced_path));
+}
+
+TEST_F(EnvTest, FaultInjectionCrashUndoesRenameWithoutDirectorySync) {
+  FaultInjectionEnv f_env(env_);
+  const std::string target = Path("rename_target.txt");
+  const std::string src = Path("rename_src.txt");
+
+  auto write_file = [&](const std::string& path, const std::string& contents) {
+    std::unique_ptr<WritableFile> wfile;
+    ASSERT_TRUE(f_env.NewWritableFile(path, &wfile).ok());
+    ASSERT_TRUE(wfile->Append(contents).ok());
+    ASSERT_TRUE(wfile->Sync().ok());
+    ASSERT_TRUE(wfile->Close().ok());
+  };
+  auto read_file = [&](const std::string& path) {
+    std::unique_ptr<SequentialFile> rfile;
+    EXPECT_TRUE(f_env.NewSequentialFile(path, &rfile).ok());
+    char scratch[64];
+    std::string_view result;
+    EXPECT_TRUE(rfile->Read(sizeof(scratch), &result, scratch).ok());
+    return std::string(result);
+  };
+
+  write_file(target, "old");
+  ASSERT_TRUE(f_env.SyncDir(test_dir_).ok());
+
+  write_file(src, "new");
+  ASSERT_TRUE(f_env.RenameFile(src, target).ok());
+  EXPECT_EQ(read_file(target), "new");
+  ASSERT_TRUE(f_env.SimulateCrash().ok());
+  f_env.ResumeAfterCrash();
+  EXPECT_EQ(read_file(target), "old");
+
+  // With the directory synced, the rename is durable.
+  write_file(src, "new");
+  ASSERT_TRUE(f_env.RenameFile(src, target).ok());
+  ASSERT_TRUE(f_env.SyncDir(test_dir_).ok());
+  ASSERT_TRUE(f_env.SimulateCrash().ok());
+  f_env.ResumeAfterCrash();
+  EXPECT_EQ(read_file(target), "new");
+}
+
+TEST_F(EnvTest, FaultInjectionCrashCanKeepATornTail) {
+  FaultInjectionEnv f_env(env_);
+  const std::string file_path = Path("torn.txt");
+  const std::string tail(1000, 'x');
+
+  std::set<uint64_t> sizes;
+  for (uint32_t seed = 0; seed < 20; ++seed) {
+    std::unique_ptr<WritableFile> wfile;
+    ASSERT_TRUE(f_env.NewWritableFile(file_path, &wfile).ok());
+    ASSERT_TRUE(wfile->Append("synced").ok());
+    ASSERT_TRUE(wfile->Sync().ok());
+    ASSERT_TRUE(f_env.SyncDir(test_dir_).ok());
+    ASSERT_TRUE(wfile->Append(tail).ok());
+    ASSERT_TRUE(f_env.SimulateCrash(FaultInjectionEnv::UnsyncedData::kKeepRandomTail, seed).ok());
+    f_env.ResumeAfterCrash();
+
+    uint64_t size = 0;
+    ASSERT_TRUE(f_env.GetFileSize(file_path, &size).ok());
+    EXPECT_GE(size, 6U);
+    EXPECT_LE(size, 6U + tail.size());
+    sizes.insert(size);
+  }
+  EXPECT_GT(sizes.size(), 1U) << "the tail should be cut at different places";
+}
+
+TEST_F(EnvTest, FaultInjectionCrashesAtTheChosenOperation) {
+  FaultInjectionEnv f_env(env_);
+  f_env.SetCrashAtOperation(3);
+
+  std::unique_ptr<WritableFile> wfile;
+  ASSERT_TRUE(f_env.NewWritableFile(Path("crash_at.txt"), &wfile).ok());  // operation 1
+  ASSERT_TRUE(wfile->Append("a").ok());                                   // operation 2
+  EXPECT_TRUE(f_env.IsFilesystemActive());
+  EXPECT_TRUE(wfile->Sync().IsIOError());  // operation 3: the crash
+  EXPECT_FALSE(f_env.IsFilesystemActive());
+  EXPECT_TRUE(wfile->Append("b").IsIOError());
+
+  ASSERT_TRUE(f_env.SimulateCrash().ok());
+  f_env.ResumeAfterCrash();
+  EXPECT_TRUE(f_env.IsFilesystemActive());
+}
+
+TEST_F(EnvTest, FaultInjectionFailedManifestSyncKeepsItsBytes) {
+  FaultInjectionEnv f_env(env_);
+  const std::string manifest = Path("MANIFEST-000001");
+  const std::string other = Path("000002.sst");
+
+  std::unique_ptr<WritableFile> manifest_file;
+  std::unique_ptr<WritableFile> other_file;
+  ASSERT_TRUE(f_env.NewWritableFile(manifest, &manifest_file).ok());
+  ASSERT_TRUE(f_env.NewWritableFile(other, &other_file).ok());
+
+  f_env.SetFailManifestSyncs(true);
+  ASSERT_TRUE(manifest_file->Append("record").ok());
+  EXPECT_TRUE(manifest_file->Sync().IsIOError());
+  EXPECT_TRUE(other_file->Sync().ok());
+
+  uint64_t size = 0;
+  ASSERT_TRUE(f_env.GetFileSize(manifest, &size).ok());
+  EXPECT_EQ(size, 6U);
+}
+
+TEST_F(EnvTest, FaultInjectionErrorInjection) {
+  FaultInjectionEnv f_env(env_);
+  const std::string file_path = Path("fault_inject_file.txt");
+
+  // Test NewWritableFile error
+  f_env.SetFailNewWritableFile(true);
+  std::unique_ptr<WritableFile> wfile;
+  EXPECT_TRUE(f_env.NewWritableFile(file_path, &wfile).IsIOError());
+  f_env.SetFailNewWritableFile(false);
+
+  // Successfully open file
+  ASSERT_TRUE(f_env.NewWritableFile(file_path, &wfile).ok());
+
+  // Test write error on Append and Flush
+  f_env.SetFailWrites(true);
+  EXPECT_TRUE(wfile->Append("hello").IsIOError());
+  EXPECT_TRUE(wfile->Flush().IsIOError());
+  f_env.SetFailWrites(false);
+  ASSERT_TRUE(wfile->Append("hello").ok());
+  ASSERT_TRUE(wfile->Flush().ok());
+
+  // Test sync error on file and dir
+  f_env.SetFailSyncs(true);
+  EXPECT_TRUE(wfile->Sync().IsIOError());
+  EXPECT_TRUE(f_env.SyncDir(test_dir_).IsIOError());
+  f_env.SetFailSyncs(false);
+  ASSERT_TRUE(wfile->Sync().ok());
+  ASSERT_TRUE(f_env.SyncDir(test_dir_).ok());
+
+  // Test inactive filesystem
+  f_env.SetFilesystemActive(false);
+  EXPECT_TRUE(wfile->Append("more").IsIOError());
+  EXPECT_TRUE(wfile->Flush().IsIOError());
+  EXPECT_TRUE(wfile->Sync().IsIOError());
+  EXPECT_TRUE(f_env.SyncDir(test_dir_).IsIOError());
+  EXPECT_TRUE(f_env.RemoveFile(file_path).IsIOError());
+  EXPECT_TRUE(f_env.RenameFile(file_path, Path("renamed.txt")).IsIOError());
+  EXPECT_TRUE(f_env.CreateDir(Path("sub_dir")).IsIOError());
+  EXPECT_TRUE(f_env.RemoveDir(Path("sub_dir")).IsIOError());
+
+  std::unique_ptr<SequentialFile> seq_file;
+  EXPECT_TRUE(f_env.NewSequentialFile(file_path, &seq_file).IsIOError());
+  std::unique_ptr<RandomAccessFile> rnd_file;
+  EXPECT_TRUE(f_env.NewRandomAccessFile(file_path, &rnd_file).IsIOError());
+
+  f_env.SetFilesystemActive(true);
+
+  ASSERT_TRUE(wfile->Close().ok());
 }
 
 }  // namespace

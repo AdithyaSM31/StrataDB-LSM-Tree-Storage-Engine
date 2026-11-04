@@ -45,6 +45,11 @@ Status TableCache::FindTable(uint64_t number, uint64_t file_size, std::shared_pt
   }
   std::unique_ptr<RandomAccessFile> file;
   Status s = env_->NewRandomAccessFile(fname, &file);
+  if (s.IsNotFound()) {
+    // Not NotFound: Get would pass that on, and a lost table would look like
+    // keys that were never written.
+    return Status::Corruption("table file missing", fname);
+  }
   if (!s.ok()) {
     return s;
   }

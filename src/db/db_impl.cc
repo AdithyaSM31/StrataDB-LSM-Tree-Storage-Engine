@@ -238,6 +238,8 @@ Status DBImpl::Recover() {
     return s;
   }
   logs.clear();
+  std::set<uint64_t> missing_tables;
+  versions_->AddLiveFiles(&missing_tables);
   for (const auto& filename : filenames) {
     uint64_t number = 0;
     FileType type;
@@ -245,8 +247,14 @@ Status DBImpl::Recover() {
       versions_->MarkFileNumberUsed(number);
       if (type == FileType::kLogFile) {
         logs.push_back(number);
+      } else if (type == FileType::kTableFile) {
+        missing_tables.erase(number);
       }
     }
+  }
+  if (!missing_tables.empty()) {
+    return Status::Corruption(std::to_string(missing_tables.size()) + " missing table files, e.g.",
+                              TableFileName(dbname_, *missing_tables.begin()));
   }
 
   // Replay only logs numbered at or above versions_->LogNumber()
@@ -315,6 +323,8 @@ Status DBImpl::Recover() {
     if (!s.ok()) {
       return s;
     }
+    flush_count_++;
+    flush_bytes_ += meta.file_size;
     mem_->Unref();
     mem_ = new MemTable(icmp_);
     mem_->Ref();
@@ -406,13 +416,22 @@ Status DBImpl::RecoverLogFile(uint64_t number, SequenceNumber* max_sequence, boo
   return Status::OK();
 }
 
-Status DBImpl::SwitchMemTable() {
+Status DBImpl::SwitchMemTable(std::unique_lock<std::mutex>* lock) {
   const uint64_t new_number = versions_->NewFileNumber();
   const std::string log_fname = LogFileName(dbname_, new_number);
   std::unique_ptr<WritableFile> new_logfile;
   Status s = env_->NewWritableFile(log_fname, &new_logfile);
   if (!s.ok()) {
     versions_->ReuseFileNumber(new_number);
+    return s;
+  }
+  // A synced write to this log is only durable if the log's directory entry is.
+  // Only the queue leader switches memtables, so nothing below can change while
+  // the lock is dropped, and readers don't wait for the fsync.
+  lock->unlock();
+  s = env_->SyncDir(dbname_);
+  lock->lock();
+  if (!s.ok()) {
     return s;
   }
   log_.reset();
@@ -428,6 +447,13 @@ Status DBImpl::SwitchMemTable() {
   mem_->Ref();
   background_work_cv_.notify_all();
   return Status::OK();
+}
+
+void DBImpl::RecordBackgroundError(const Status& s) {
+  if (bg_error_.ok()) {
+    bg_error_ = s;
+    background_work_cv_.notify_all();
+  }
 }
 
 Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force) {
@@ -459,8 +485,9 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force) 
       background_work_cv_.wait(*lock);
       continue;
     }
-    Status s = SwitchMemTable();
+    Status s = SwitchMemTable(lock);
     if (!s.ok()) {
+      RecordBackgroundError(s);
       return s;
     }
     force = false;
@@ -468,9 +495,8 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force) 
 }
 
 bool DBImpl::HasBackgroundWork() const {
-  return shutting_down_.load(std::memory_order_acquire) ||
-         (bg_error_.ok() &&
-          (imm_ != nullptr || manual_compaction_ != nullptr || versions_->NeedsCompaction()));
+  return shutting_down_.load(std::memory_order_acquire) || !bg_error_.ok() ||
+         (imm_ != nullptr || manual_compaction_ != nullptr || versions_->NeedsCompaction());
 }
 
 SequenceNumber DBImpl::SmallestSnapshot() const {
@@ -505,9 +531,15 @@ void DBImpl::BackgroundThreadMain() {
         CompactionState compact(c.get(), SmallestSnapshot(), /*manual=*/true);
         // A failure is recorded in bg_error_, which CompactRange returns.
         (void)DoCompactionWork(&compact, &lock);
-        m->done = true;
+        // A background error can release the caller during the compaction. It
+        // clears manual_compaction_ as it goes, and `m` went with its stack frame.
+        if (manual_compaction_ == m) {
+          m->done = true;
+        }
       }
-      manual_compaction_ = nullptr;
+      if (manual_compaction_ == m) {
+        manual_compaction_ = nullptr;
+      }
       background_work_cv_.notify_all();
       continue;
     }
@@ -556,16 +588,25 @@ void DBImpl::CompactMemTable() {
   }
 
   if (s.ok()) {
+    flush_count_++;
+    flush_bytes_ += meta.file_size;
     imm_->Unref();
     imm_ = nullptr;
     has_imm_.store(false, std::memory_order_release);
     RemoveObsoleteFiles();
   } else {
-    bg_error_ = s;  // sticky
+    RecordBackgroundError(s);
   }
 }
 
 void DBImpl::RemoveObsoleteFiles() {
+  // After a background error the MANIFEST may hold an edit this process never
+  // applied, so a file that looks obsolete here may be live after the next Open.
+  // That Open cleans up instead, once it knows which version won.
+  if (!bg_error_.ok()) {
+    return;
+  }
+
   std::set<uint64_t> live_tables = pending_outputs_;
   versions_->AddLiveFiles(&live_tables);
 
@@ -695,6 +736,7 @@ Status DBImpl::WriteImpl(const WriteOptions& opts, WriteBatch* batch) {
     } else {
       WriteBatchInternal::SetSequence(updates, last_sequence + 1);
       last_sequence += count;
+      const size_t batch_bytes = WriteBatchInternal::Contents(updates).size();
       {
         lock.unlock();
         s = log_->AddRecord(WriteBatchInternal::Contents(updates));
@@ -707,9 +749,9 @@ Status DBImpl::WriteImpl(const WriteOptions& opts, WriteBatch* batch) {
         lock.lock();
       }
       if (!s.ok()) {
-        bg_error_ = s;  // sticky
-        background_work_cv_.notify_all();
+        RecordBackgroundError(s);
       } else {
+        user_bytes_written_ += batch_bytes;
         versions_->SetLastSequence(last_sequence);
       }
     }
@@ -938,6 +980,9 @@ Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!bg_error_.ok()) {
+      return bg_error_;
+    }
     for (int level = 1; level < kNumLevels; ++level) {
       std::vector<FileMetaData*> overlapping;
       versions_->GetOverlappingInputs(level, begin_ptr, end_ptr, &overlapping);
@@ -954,6 +999,10 @@ Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
 
   for (int level = 0; level < max_level_with_files; ++level) {
     TEST_CompactRange(level, begin_ptr, end_ptr);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!bg_error_.ok()) {
+      return bg_error_;
+    }
   }
   std::lock_guard<std::mutex> lock(mutex_);
   return bg_error_;
@@ -1085,7 +1134,10 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
 
     Status s = versions_->LogAndApply(&edit);
     if (!s.ok()) {
-      bg_error_ = s;
+      RecordBackgroundError(s);
+    } else {
+      // Only metadata changed: no table bytes were read or written.
+      compaction_stats_[compact->compaction->level()].count++;
     }
     compact->compaction->ReleaseInputVersion();
     RemoveObsoleteFiles();
@@ -1109,6 +1161,11 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
       if (imm_ != nullptr) {
         CompactMemTable();
         background_work_cv_.notify_all();
+      }
+      if (!bg_error_.ok()) {
+        status = bg_error_;
+        lock->unlock();
+        break;
       }
       lock->unlock();
     }
@@ -1192,19 +1249,36 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, std::unique_lock<std::
     status = Status::IOError("compaction aborted by shutdown");
   }
 
+  const bool install_attempted = status.ok();
   if (status.ok()) {
     status = InstallCompactionResults(compact);
+  }
+
+  uint64_t bytes_read = 0;
+  for (int which = 0; which < 2; ++which) {
+    for (size_t i = 0; i < compact->compaction->num_input_files(which); ++i) {
+      bytes_read += compact->compaction->input(which, i)->file_size;
+    }
   }
 
   compact->compaction->ReleaseInputVersion();
 
   if (!status.ok()) {
-    if (!shutting_down_.load(std::memory_order_acquire)) {
-      bg_error_ = status;
+    if (install_attempted || !shutting_down_.load(std::memory_order_acquire)) {
+      RecordBackgroundError(status);
     }
-    for (const auto& out : compact->outputs) {
-      (void)env_->RemoveFile(TableFileName(dbname_, out.number));
+    // A failed install may still have reached the MANIFEST, so keep its outputs:
+    // the next Open deletes them if they turn out not to be listed.
+    if (!install_attempted) {
+      for (const auto& out : compact->outputs) {
+        (void)env_->RemoveFile(TableFileName(dbname_, out.number));
+      }
     }
+  } else {
+    const int lvl = compact->compaction->level();
+    compaction_stats_[lvl].count++;
+    compaction_stats_[lvl].bytes_read += bytes_read;
+    compaction_stats_[lvl].bytes_written += compact->total_bytes;
   }
 
   // Only now, with the outputs either installed in the current version or
@@ -1226,7 +1300,87 @@ bool DBImpl::GetProperty(std::string_view name, std::string* value) {
     *value = recovery_status_.ok() ? "OK" : recovery_status_.ToString();
     return true;
   }
-  return false;  // "strata.stats" arrives in Week 4
+  constexpr std::string_view kNumFilesPrefix = "strata.num-files-at-level";
+  if (name.size() > kNumFilesPrefix.size() &&
+      name.substr(0, kNumFilesPrefix.size()) == kNumFilesPrefix) {
+    std::string_view suffix = name.substr(kNumFilesPrefix.size());
+    if (suffix.size() == 1 && suffix[0] >= '0' && suffix[0] < '0' + kNumLevels) {
+      const int level = suffix[0] - '0';
+      *value = std::to_string(versions_->NumLevelFiles(level));
+      return true;
+    }
+    return false;
+  }
+  if (name == "strata.stats") {
+    char buf[512];
+    std::string s;
+    s.reserve(1024);
+    s.append("                               Compactions\n");
+    s.append("Level  Files   Size(MB)   Count    Read(MB)   Write(MB)\n");
+    s.append("-------------------------------------------------------\n");
+
+    uint64_t total_files = 0;
+    uint64_t total_size = 0;
+    uint64_t total_compaction_count = 0;
+    uint64_t total_compaction_read = 0;
+    uint64_t total_compaction_written = 0;
+
+    for (int level = 0; level < kNumLevels; ++level) {
+      const auto& level_files = versions_->current()->files(level);
+      const uint64_t num_files = level_files.size();
+      uint64_t level_size = 0;
+      for (const auto* f : level_files) {
+        level_size += f->file_size;
+      }
+      total_files += num_files;
+      total_size += level_size;
+
+      const uint64_t comp_count = compaction_stats_[level].count;
+      const uint64_t comp_read = compaction_stats_[level].bytes_read;
+      const uint64_t comp_written = compaction_stats_[level].bytes_written;
+
+      total_compaction_count += comp_count;
+      total_compaction_read += comp_read;
+      total_compaction_written += comp_written;
+
+      std::snprintf(
+          buf, sizeof(buf), "%3d   %5llu   %8.2f   %5llu   %9.2f   %9.2f\n", level,
+          static_cast<unsigned long long>(num_files), static_cast<double>(level_size) / 1048576.0,
+          static_cast<unsigned long long>(comp_count), static_cast<double>(comp_read) / 1048576.0,
+          static_cast<double>(comp_written) / 1048576.0);
+      s.append(buf);
+    }
+    s.append("-------------------------------------------------------\n");
+
+    const uint64_t total_sstable_written = flush_bytes_ + total_compaction_written;
+    double write_amp = 0.0;
+    if (user_bytes_written_ > 0) {
+      write_amp =
+          static_cast<double>(total_sstable_written) / static_cast<double>(user_bytes_written_);
+    } else if (flush_bytes_ > 0) {
+      write_amp = static_cast<double>(total_sstable_written) / static_cast<double>(flush_bytes_);
+    }
+
+    std::snprintf(buf, sizeof(buf),
+                  "Total files: %llu, Total size: %.2f MB\n"
+                  "Flush count: %llu, Compaction count: %llu\n"
+                  "Compaction read: %.2f MB, write: %.2f MB\n"
+                  "User bytes written: %.2f MB\n"
+                  "SSTable bytes written: %.2f MB\n"
+                  "Write amplification: %.2f\n",
+                  static_cast<unsigned long long>(total_files),
+                  static_cast<double>(total_size) / 1048576.0,
+                  static_cast<unsigned long long>(flush_count_),
+                  static_cast<unsigned long long>(total_compaction_count),
+                  static_cast<double>(total_compaction_read) / 1048576.0,
+                  static_cast<double>(total_compaction_written) / 1048576.0,
+                  static_cast<double>(user_bytes_written_) / 1048576.0,
+                  static_cast<double>(total_sstable_written) / 1048576.0, write_amp);
+    s.append(buf);
+    *value = std::move(s);
+    return true;
+  }
+  return false;
 }
 
 }  // namespace strata

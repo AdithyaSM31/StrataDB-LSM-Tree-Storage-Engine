@@ -54,12 +54,12 @@ Tick items off as they land; each one should arrive with its tests.
 
 - [x] Group commit writer queue and `sync` handling
 - [x] Sharded LRU block cache and table cache
-- [ ] Sticky background error handling
-- [ ] `FaultInjectionEnv` with `SimulateCrash()` and error injection
-- [ ] Crash test (synced writes present, state is a prefix of history)
-- [ ] Fork-and-SIGKILL harness
-- [ ] SSTable corruption test
-- [ ] `GetProperty("strata.stats")`: per-level files, bytes, compaction counts, write amplification
+- [x] Sticky background error handling
+- [x] `FaultInjectionEnv` with `SimulateCrash()` and error injection
+- [x] Crash test (synced writes present, state is a prefix of history)
+- [x] Fork-and-SIGKILL harness
+- [x] SSTable corruption test
+- [x] `GetProperty("strata.stats")`: per-level files, bytes, compaction counts, write amplification
 
 ## Week 5 (30 Nov–6 Dec): benchmarks, profiling and write-up
 

@@ -129,7 +129,7 @@ class DBImpl : public DB {
   // queue like any writer and, once it leads, force a memtable switch.
   Status WriteImpl(const WriteOptions& opts, WriteBatch* batch);
   WriteBatch* BuildBatchGroup(Writer** last_writer);
-  Status SwitchMemTable();
+  Status SwitchMemTable(std::unique_lock<std::mutex>* lock);
   void BackgroundThreadMain();
   bool HasBackgroundWork() const;
   void CompactMemTable();
@@ -149,6 +149,7 @@ class DBImpl : public DB {
   Status FinishCompactionOutputFile(CompactionState* compact);
   Status InstallCompactionResults(CompactionState* compact);
   std::unique_ptr<Iterator> MakeInputIterator(Compaction* c);
+  void RecordBackgroundError(const Status& s);  // REQUIRES: mutex_ held
 
   Env* const env_;
   const Options options_;
@@ -178,6 +179,16 @@ class DBImpl : public DB {
   std::atomic<bool> has_imm_{false};
   std::set<uint64_t> pending_outputs_;             // table files being written: never delete these
   ManualCompaction* manual_compaction_ = nullptr;  // guarded by mutex_
+
+  struct CompactionStats {
+    uint64_t count = 0;
+    uint64_t bytes_read = 0;
+    uint64_t bytes_written = 0;
+  };
+  CompactionStats compaction_stats_[kNumLevels];  // guarded by mutex_
+  uint64_t flush_count_ = 0;                      // guarded by mutex_
+  uint64_t flush_bytes_ = 0;                      // guarded by mutex_
+  uint64_t user_bytes_written_ = 0;               // guarded by mutex_
 };
 
 }  // namespace strata
