@@ -65,7 +65,7 @@ Tick items off as they land; each one should arrive with its tests.
 
 **Milestone:** BENCHMARKS.md with reproducible numbers against LevelDB, and a README you would send to a recruiter.
 
-- [ ] `strata_bench` with StrataDB and LevelDB adapters and all workloads
+- [x] `strata_bench` with StrataDB and LevelDB adapters and all workloads
 - [ ] YCSB A/B/C with Zipfian keys
 - [ ] Run on an EC2 instance with local NVMe; record hardware and flags
 - [ ] Profile with `perf` and flame graphs, fix the top hotspot, re-measure

@@ -15,6 +15,7 @@ endif()
 # ---------------------------------------------------------------------------
 option(STRATA_BUILD_TESTS "Build the GoogleTest suite" ON)
 option(STRATA_BUILD_TOOLS "Build tools/*.cc (sst_dump, manifest_dump, ...)" ON)
+option(STRATA_BUILD_BENCH "Build strata_bench benchmark harness" OFF)
 option(STRATA_WERROR "Treat warnings as errors" OFF)
 option(STRATA_DEBUG_CHECKS "Enable expensive invariant checks (STRATA_DCHECK)" OFF)
 option(STRATA_CLANG_TIDY "Run clang-tidy on StrataDB sources while compiling" OFF)
@@ -97,6 +98,36 @@ endif()
 if(STRATA_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+# ---------------------------------------------------------------------------
+# Benchmark Harness
+# ---------------------------------------------------------------------------
+if(STRATA_BUILD_BENCH)
+  include(FetchContent)
+  FetchContent_Declare(
+    leveldb
+    GIT_REPOSITORY https://github.com/google/leveldb.git
+    GIT_TAG 1.23
+    GIT_SHALLOW TRUE
+  )
+  set(LEVELDB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(LEVELDB_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(leveldb)
+
+  file(GLOB STRATA_BENCH_SOURCES CONFIGURE_DEPENDS
+       "${PROJECT_SOURCE_DIR}/bench/*.cc"
+       "${PROJECT_SOURCE_DIR}/bench/adapters/*.cc")
+  add_executable(strata_bench ${STRATA_BENCH_SOURCES})
+  target_include_directories(strata_bench PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/bench"
+    "${PROJECT_SOURCE_DIR}/src")
+  target_link_libraries(strata_bench PRIVATE
+    strata
+    leveldb
+    Threads::Threads)
+  strata_configure_target(strata_bench)
 endif()
 
 # ---------------------------------------------------------------------------

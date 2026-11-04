@@ -22,7 +22,7 @@ ctest --preset debug          # add -L unit or -L slow to filter
 | `asan`    | AddressSanitizer + UndefinedBehaviorSanitizer, `-Werror`           |
 | `tsan`    | ThreadSanitizer, `-Werror`                                         |
 | `release` | `-O2`, debug checks compiled out, `-Werror`                        |
-| `bench`   | `-O2 -g -fno-omit-frame-pointer` for `perf` flame graphs, no tests |
+| `bench`   | `-O3 -DNDEBUG`, builds `strata_bench` and fetches LevelDB 1.23     |
 
 CI runs `asan`, `tsan` and `release` (GCC and Clang) plus a `clang-format` check on every push.
 
@@ -67,6 +67,44 @@ Adding code needs no CMake edits:
 Re-run the configure step after adding a new file, or just build — the globs are checked on
 every build.
 
+## Benchmarks (`strata_bench`)
+
+StrataDB includes `strata_bench`, a standalone benchmarking harness that evaluates identical workloads against StrataDB and LevelDB (pinned tag `1.23`).
+
+### Build
+
+```bash
+cmake --preset bench
+cmake --build --preset bench --target strata_bench
+```
+
+### Run
+
+Run all workloads across both engines:
+
+```bash
+./build/bench/strata_bench --num=1000000 --threads=1
+```
+
+Quick smoke run:
+
+```bash
+./build/bench/strata_bench --num=10000 --engine=both --benchmarks=fillseq,readrandom
+```
+
+### Supported Workloads
+
+- **Writes**: `fillseq`, `fillrandom`, `overwrite`, `fillsync`
+- **Reads**: `readrandom`, `readmissing`, `readseq`, `seekrandom`
+- **Mixed**: `readwhilewriting` (concurrent writer thread + reader threads)
+
+### Fairness Guarantees
+
+- **No Compression**: LevelDB compression is explicitly disabled (`leveldb::kNoCompression`) to ensure fair comparison since StrataDB does not compress.
+- **Identical PRNG Streams**: Worker threads share deterministic seed offsets across engines so both process identical key sequences.
+- **Zero Measurement Contention**: Each worker thread times individual operations into its own log-scale `Histogram` without locks; histograms are merged after completion.
+- **Results Export**: Formatted summary table printed to stdout and full metrics exported to CSV under `bench/results/benchmarks.csv`.
+
 ## Durability
 
 _TODO: the sync=false / sync=true table from the design doc, once the WAL exists._
@@ -74,3 +112,4 @@ _TODO: the sync=false / sync=true table from the design doc, once the WAL exists
 ## Results
 
 _TODO: filled in from [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) in Week 5._
+

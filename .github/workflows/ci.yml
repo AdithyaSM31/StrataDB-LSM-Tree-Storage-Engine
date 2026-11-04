@@ -51,3 +51,11 @@ jobs:
 
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
+
+      - name: Benchmark smoke test
+        if: matrix.preset == 'release' && matrix.cxx == 'g++'
+        run: |
+          cmake --preset bench
+          cmake --build --preset bench --target strata_bench
+          ./build/bench/strata_bench --num=10000 --benchmarks=fillseq,readseq,fillrandom,readrandom,readmissing,seekrandom,overwrite,readwhilewriting,fillsync
+
