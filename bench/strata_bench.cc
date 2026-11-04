@@ -563,7 +563,8 @@ class BenchmarkRunner {
     auto t_end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t_end - t_start).count();
 
-    MarkPopulated(sync_n);
+    std::error_code ec;
+    std::filesystem::remove(engine_db_dir_ + "/.populated_num", ec);
     return BuildResult("fillsync", t_count, sync_n, elapsed, histograms,
                        (16 + cfg_.value_size) * sync_n);
   }
@@ -918,6 +919,9 @@ class BenchmarkRunner {
 
     auto t_end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t_end - t_start).count();
+
+    std::error_code ec;
+    std::filesystem::remove(engine_db_dir_ + "/.populated_num", ec);
 
     return BuildResult("readwhilewriting", reader_threads, n, elapsed, read_histograms,
                        (16 + cfg_.value_size) * n);
