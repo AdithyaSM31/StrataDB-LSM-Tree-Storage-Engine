@@ -478,9 +478,8 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>* lock, bool force) 
 }
 
 bool DBImpl::HasBackgroundWork() const {
-  return shutting_down_.load(std::memory_order_acquire) ||
-         (bg_error_.ok() &&
-          (imm_ != nullptr || manual_compaction_ != nullptr || versions_->NeedsCompaction()));
+  return shutting_down_.load(std::memory_order_acquire) || !bg_error_.ok() ||
+         (imm_ != nullptr || manual_compaction_ != nullptr || versions_->NeedsCompaction());
 }
 
 SequenceNumber DBImpl::SmallestSnapshot() const {

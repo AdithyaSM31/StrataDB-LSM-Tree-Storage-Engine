@@ -93,7 +93,26 @@ class FaultInjectionEnv : public EnvWrapper {
     return Status::OK();
   }
 
+  Status NewSequentialFile(const std::string& fname,
+                           std::unique_ptr<SequentialFile>* result) override {
+    if (!filesystem_active_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: filesystem inactive");
+    }
+    return EnvWrapper::NewSequentialFile(fname, result);
+  }
+
+  Status NewRandomAccessFile(const std::string& fname,
+                             std::unique_ptr<RandomAccessFile>* result) override {
+    if (!filesystem_active_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: filesystem inactive");
+    }
+    return EnvWrapper::NewRandomAccessFile(fname, result);
+  }
+
   Status RemoveFile(const std::string& fname) override {
+    if (!filesystem_active_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: filesystem inactive");
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       files_.erase(fname);
@@ -102,7 +121,11 @@ class FaultInjectionEnv : public EnvWrapper {
   }
 
   Status RenameFile(const std::string& src, const std::string& target) override {
-    {
+    if (!filesystem_active_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: filesystem inactive");
+    }
+    Status s = EnvWrapper::RenameFile(src, target);
+    if (s.ok()) {
       std::lock_guard<std::mutex> lock(mutex_);
       auto it = files_.find(src);
       if (it != files_.end()) {
@@ -112,7 +135,31 @@ class FaultInjectionEnv : public EnvWrapper {
         files_[target] = state;
       }
     }
-    return EnvWrapper::RenameFile(src, target);
+    return s;
+  }
+
+  Status SyncDir(const std::string& dir) override {
+    if (!filesystem_active_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: filesystem inactive");
+    }
+    if (fail_syncs_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: sync failed");
+    }
+    return EnvWrapper::SyncDir(dir);
+  }
+
+  Status CreateDir(const std::string& dir) override {
+    if (!filesystem_active_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: filesystem inactive");
+    }
+    return EnvWrapper::CreateDir(dir);
+  }
+
+  Status RemoveDir(const std::string& dir) override {
+    if (!filesystem_active_.load(std::memory_order_acquire)) {
+      return Status::IOError("injected fault: filesystem inactive");
+    }
+    return EnvWrapper::RemoveDir(dir);
   }
 
   void SetFilesystemActive(bool active) {
@@ -281,6 +328,9 @@ inline Status FaultInjectionWritableFile::Flush() {
   if (!env_->IsFilesystemActive()) {
     return Status::IOError("injected fault: filesystem inactive");
   }
+  if (env_->FailWrites()) {
+    return Status::IOError("injected fault: write failed");
+  }
   return target_->Flush();
 }
 
@@ -308,7 +358,9 @@ inline Status FaultInjectionWritableFile::Close() {
   if (crashed_ || target_ == nullptr) {
     return Status::OK();
   }
-  return target_->Close();
+  Status s = target_->Close();
+  target_.reset();
+  return s;
 }
 
 }  // namespace strata

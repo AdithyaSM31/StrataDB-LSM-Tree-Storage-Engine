@@ -270,5 +270,74 @@ TEST_F(CrashTest, MultiCrashCycles) {
   }
 }
 
+TEST_F(CrashTest, BatchAtomicityWithPutsAndDeletesAcrossCrash) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 64 * 1024;
+  ASSERT_TRUE(OpenDB(opts).ok());
+
+  // Invariant: sum of account balances must always equal 1000
+  WriteBatch initial_batch;
+  initial_batch.Put("acc_A", "1000");
+  initial_batch.Put("acc_B", "0");
+  initial_batch.Put("tx_0", "committed");
+  WriteOptions sync_wopts;
+  sync_wopts.sync = true;
+  ASSERT_TRUE(db_->Write(sync_wopts, &initial_batch).ok());
+
+  int last_synced_tx = 0;
+  for (int tx = 1; tx <= 30; ++tx) {
+    WriteBatch batch;
+    const int bal_a = 1000 - tx * 20;
+    const int bal_b = tx * 20;
+    batch.Put("acc_A", std::to_string(bal_a));
+    batch.Put("acc_B", std::to_string(bal_b));
+    batch.Delete("tx_" + std::to_string(tx - 1));
+    batch.Put("tx_" + std::to_string(tx), "committed");
+
+    WriteOptions wopts;
+    if (tx % 5 == 0) {
+      wopts.sync = true;
+      last_synced_tx = tx;
+    }
+    ASSERT_TRUE(db_->Write(wopts, &batch).ok());
+  }
+
+  // Crash
+  ASSERT_TRUE(fault_env_->SimulateCrash().ok());
+  db_.reset();
+
+  // Reopen and check invariant
+  opts.create_if_missing = false;
+  ASSERT_TRUE(OpenDB(opts).ok());
+
+  std::string str_a;
+  std::string str_b;
+  ASSERT_TRUE(db_->Get(ReadOptions(), "acc_A", &str_a).ok());
+  ASSERT_TRUE(db_->Get(ReadOptions(), "acc_B", &str_b).ok());
+
+  const int val_a = std::stoi(str_a);
+  const int val_b = std::stoi(str_b);
+  EXPECT_EQ(val_a + val_b, 1000) << "Atomicity violated! Sum is " << (val_a + val_b);
+
+  // Synced balance state must be at least up to last_synced_tx
+  EXPECT_LE(val_a, 1000 - last_synced_tx * 20);
+  EXPECT_GE(val_b, last_synced_tx * 20);
+
+  // Exactly one tx marker should exist
+  int found_tx = -1;
+  for (int tx = 0; tx <= 30; ++tx) {
+    std::string val;
+    Status s = db_->Get(ReadOptions(), "tx_" + std::to_string(tx), &val);
+    if (s.ok()) {
+      EXPECT_EQ(found_tx, -1) << "Multiple tx markers found! tx " << found_tx << " and " << tx;
+      found_tx = tx;
+    }
+  }
+  EXPECT_NE(found_tx, -1);
+  EXPECT_EQ(val_a, 1000 - found_tx * 20);
+  EXPECT_EQ(val_b, found_tx * 20);
+}
+
 }  // namespace
 }  // namespace strata

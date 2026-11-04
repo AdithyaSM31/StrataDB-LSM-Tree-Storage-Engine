@@ -31,6 +31,25 @@ std::string ValStr(uint64_t i) {
   return std::string(buf);
 }
 
+bool ReadExact(int fd, void* buf, size_t n) {
+  char* ptr = static_cast<char*>(buf);
+  while (n > 0) {
+    ssize_t r = read(fd, ptr, n);
+    if (r < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (r == 0) {
+      return false;
+    }
+    ptr += r;
+    n -= static_cast<size_t>(r);
+  }
+  return true;
+}
+
 class KillTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -116,8 +135,7 @@ TEST_F(KillTest, ThousandKillIterationsSurviveWithoutDataLoss) {
 
     // Wait until child has performed at least one synced write
     uint64_t first_sync = 0;
-    ssize_t n = read(pipe_fds[0], &first_sync, sizeof(first_sync));
-    if (n == static_cast<ssize_t>(sizeof(first_sync))) {
+    if (ReadExact(pipe_fds[0], &first_sync, sizeof(first_sync))) {
       confirmed_syncs.push_back(first_sync);
     }
 
@@ -137,8 +155,7 @@ TEST_F(KillTest, ThousandKillIterationsSurviveWithoutDataLoss) {
     // Read remaining confirmed synced keys from the child
     while (true) {
       uint64_t synced_idx = 0;
-      ssize_t r = read(pipe_fds[0], &synced_idx, sizeof(synced_idx));
-      if (r == static_cast<ssize_t>(sizeof(synced_idx))) {
+      if (ReadExact(pipe_fds[0], &synced_idx, sizeof(synced_idx))) {
         confirmed_syncs.push_back(synced_idx);
       } else {
         break;

@@ -780,22 +780,38 @@ TEST_F(EnvTest, FaultInjectionErrorInjection) {
   // Successfully open file
   ASSERT_TRUE(f_env.NewWritableFile(file_path, &wfile).ok());
 
-  // Test write error
+  // Test write error on Append and Flush
   f_env.SetFailWrites(true);
   EXPECT_TRUE(wfile->Append("hello").IsIOError());
+  EXPECT_TRUE(wfile->Flush().IsIOError());
   f_env.SetFailWrites(false);
   ASSERT_TRUE(wfile->Append("hello").ok());
+  ASSERT_TRUE(wfile->Flush().ok());
 
-  // Test sync error
+  // Test sync error on file and dir
   f_env.SetFailSyncs(true);
   EXPECT_TRUE(wfile->Sync().IsIOError());
+  EXPECT_TRUE(f_env.SyncDir(test_dir_).IsIOError());
   f_env.SetFailSyncs(false);
   ASSERT_TRUE(wfile->Sync().ok());
+  ASSERT_TRUE(f_env.SyncDir(test_dir_).ok());
 
   // Test inactive filesystem
   f_env.SetFilesystemActive(false);
   EXPECT_TRUE(wfile->Append("more").IsIOError());
+  EXPECT_TRUE(wfile->Flush().IsIOError());
   EXPECT_TRUE(wfile->Sync().IsIOError());
+  EXPECT_TRUE(f_env.SyncDir(test_dir_).IsIOError());
+  EXPECT_TRUE(f_env.RemoveFile(file_path).IsIOError());
+  EXPECT_TRUE(f_env.RenameFile(file_path, Path("renamed.txt")).IsIOError());
+  EXPECT_TRUE(f_env.CreateDir(Path("sub_dir")).IsIOError());
+  EXPECT_TRUE(f_env.RemoveDir(Path("sub_dir")).IsIOError());
+
+  std::unique_ptr<SequentialFile> seq_file;
+  EXPECT_TRUE(f_env.NewSequentialFile(file_path, &seq_file).IsIOError());
+  std::unique_ptr<RandomAccessFile> rnd_file;
+  EXPECT_TRUE(f_env.NewRandomAccessFile(file_path, &rnd_file).IsIOError());
+
   f_env.SetFilesystemActive(true);
 
   ASSERT_TRUE(wfile->Close().ok());
