@@ -15,6 +15,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "util/fault_injection_env.h"
 #include "util/random.h"
 
 namespace strata {
@@ -738,6 +739,66 @@ TEST_F(EnvTest, FileWrappersDelegationAndOwnership) {
   ASSERT_TRUE(rnd_wrapper->Read(6, 7, &res, scratch).ok());
   EXPECT_EQ(res, "wrapper");
   rnd_wrapper.reset();
+}
+
+TEST_F(EnvTest, FaultInjectionCrashLosesUnsyncedData) {
+  FaultInjectionEnv f_env(env_);
+  const std::string file_path = Path("fault_test_file.txt");
+
+  std::unique_ptr<WritableFile> wfile;
+  ASSERT_TRUE(f_env.NewWritableFile(file_path, &wfile).ok());
+  ASSERT_TRUE(wfile->Append("synced_prefix").ok());
+  ASSERT_TRUE(wfile->Sync().ok());
+
+  ASSERT_TRUE(wfile->Append("_unsynced_tail").ok());
+  // Do NOT sync the second part
+  ASSERT_TRUE(wfile->Close().ok());
+  wfile.reset();
+
+  // Simulate crash
+  ASSERT_TRUE(f_env.SimulateCrash().ok());
+
+  // Check file contents: must have truncated to synced_prefix
+  std::unique_ptr<SequentialFile> rfile;
+  ASSERT_TRUE(f_env.NewSequentialFile(file_path, &rfile).ok());
+  char scratch[64];
+  std::string_view read_result;
+  ASSERT_TRUE(rfile->Read(64, &read_result, scratch).ok());
+  EXPECT_EQ(read_result, "synced_prefix");
+}
+
+TEST_F(EnvTest, FaultInjectionErrorInjection) {
+  FaultInjectionEnv f_env(env_);
+  const std::string file_path = Path("fault_inject_file.txt");
+
+  // Test NewWritableFile error
+  f_env.SetFailNewWritableFile(true);
+  std::unique_ptr<WritableFile> wfile;
+  EXPECT_TRUE(f_env.NewWritableFile(file_path, &wfile).IsIOError());
+  f_env.SetFailNewWritableFile(false);
+
+  // Successfully open file
+  ASSERT_TRUE(f_env.NewWritableFile(file_path, &wfile).ok());
+
+  // Test write error
+  f_env.SetFailWrites(true);
+  EXPECT_TRUE(wfile->Append("hello").IsIOError());
+  f_env.SetFailWrites(false);
+  ASSERT_TRUE(wfile->Append("hello").ok());
+
+  // Test sync error
+  f_env.SetFailSyncs(true);
+  EXPECT_TRUE(wfile->Sync().IsIOError());
+  f_env.SetFailSyncs(false);
+  ASSERT_TRUE(wfile->Sync().ok());
+
+  // Test inactive filesystem
+  f_env.SetFilesystemActive(false);
+  EXPECT_TRUE(wfile->Append("more").IsIOError());
+  EXPECT_TRUE(wfile->Sync().IsIOError());
+  f_env.SetFilesystemActive(true);
+
+  ASSERT_TRUE(wfile->Close().ok());
 }
 
 }  // namespace

@@ -733,7 +733,57 @@ TEST_F(DBTest, FutureMethodsReturnNotSupported) {
   EXPECT_TRUE(it->status().ok());
 
   std::string prop;
-  EXPECT_FALSE(db_->GetProperty("strata.stats", &prop));
+  EXPECT_TRUE(db_->GetProperty("strata.stats", &prop));
+  EXPECT_NE(prop.find("Level"), std::string::npos);
+  EXPECT_NE(prop.find("Write amplification"), std::string::npos);
+}
+
+TEST_F(DBTest, StrataStatsPropertyReportsFilesBytesCompactionAndWriteAmp) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 64 * 1024;
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Initially: empty db stats
+  std::string stats;
+  ASSERT_TRUE(db_->GetProperty("strata.stats", &stats));
+  EXPECT_NE(stats.find("Total files: 0"), std::string::npos);
+  EXPECT_NE(stats.find("Write amplification: 0.00"), std::string::npos);
+
+  // Write enough data to flush multiple L0 files
+  for (int i = 0; i < 200; ++i) {
+    char k[32];
+    char v[128];
+    std::snprintf(k, sizeof(k), "key_%04d", i);
+    std::snprintf(v, sizeof(v), "val_%04d_payload_bytes_for_stats_test", i);
+    ASSERT_TRUE(Put(k, v).ok());
+  }
+  ASSERT_TRUE(db_->Flush().ok());
+
+  ASSERT_TRUE(db_->GetProperty("strata.stats", &stats));
+  EXPECT_NE(stats.find("Total files:"), std::string::npos);
+  EXPECT_NE(stats.find("Flush count:"), std::string::npos);
+  EXPECT_NE(stats.find("Write amplification:"), std::string::npos);
+
+  // Test per-level file count property
+  std::string l0_files;
+  ASSERT_TRUE(db_->GetProperty("strata.num-files-at-level0", &l0_files));
+  EXPECT_FALSE(l0_files.empty());
+  EXPECT_NE(l0_files, "0");
+
+  std::string l1_files;
+  ASSERT_TRUE(db_->GetProperty("strata.num-files-at-level1", &l1_files));
+  EXPECT_EQ(l1_files, "0");
+
+  // Run compaction to level 1
+  ASSERT_TRUE(db_->CompactRange("a", "z").ok());
+  ASSERT_TRUE(db_->GetProperty("strata.stats", &stats));
+  EXPECT_NE(stats.find("Compaction count:"), std::string::npos);
+
+  // Invalid properties
+  std::string dummy;
+  EXPECT_FALSE(db_->GetProperty("strata.unknown_property", &dummy));
+  EXPECT_FALSE(db_->GetProperty("strata.num-files-at-level99", &dummy));
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,6 +1212,114 @@ TEST_F(DBTest, StickyBackgroundError) {
 
   // Data written earlier still reads back
   EXPECT_EQ(Get("k_initial"), "v_initial");
+
+  Close();
+}
+
+TEST_F(DBTest, StickyCompactionError) {
+  auto flaky_env = std::make_unique<FailingSstEnv>(Env::Default());
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = flaky_env.get();
+
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Write data and flush cleanly to create L0 files
+  ASSERT_TRUE(Put("a_key", "a_val").ok());
+  ASSERT_TRUE(Put("b_key", "b_val").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  ASSERT_TRUE(Put("c_key", "c_val").ok());
+  ASSERT_TRUE(Put("d_key", "d_val").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // Now fail any new SST file writes during compaction
+  flaky_env->SetFailSst(true);
+
+  // CompactRange forces compaction of L0 files into L1
+  Status s = db_->CompactRange("a", "z");
+  EXPECT_FALSE(s.ok());
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+
+  // Subsequent writes fail with sticky error
+  Status s2 = Put("e_key", "e_val");
+  EXPECT_FALSE(s2.ok());
+  EXPECT_TRUE(s2.IsIOError()) << s2.ToString();
+
+  // Subsequent Flush fails with sticky error
+  Status s3 = db_->Flush();
+  EXPECT_FALSE(s3.ok());
+  EXPECT_TRUE(s3.IsIOError()) << s3.ToString();
+
+  // Subsequent CompactRange fails with sticky error
+  Status s4 = db_->CompactRange("a", "z");
+  EXPECT_FALSE(s4.ok());
+  EXPECT_TRUE(s4.IsIOError()) << s4.ToString();
+
+  // Data written earlier still reads back
+  EXPECT_EQ(Get("a_key"), "a_val");
+  EXPECT_EQ(Get("c_key"), "c_val");
+
+  Close();
+}
+
+namespace {
+
+class FailingLogEnv : public EnvWrapper {
+ public:
+  explicit FailingLogEnv(Env* target) : EnvWrapper(target) {}
+
+  Status NewWritableFile(const std::string& fname, std::unique_ptr<WritableFile>* result) override {
+    uint64_t number = 0;
+    FileType type;
+    std::string_view basename = fname;
+    const auto slash = basename.rfind('/');
+    if (slash != std::string_view::npos) {
+      basename.remove_prefix(slash + 1);
+    }
+    if (fail_new_log_.load() && ParseFileName(basename, &number, &type) &&
+        type == FileType::kLogFile) {
+      return Status::IOError("injected log creation failure");
+    }
+    return EnvWrapper::NewWritableFile(fname, result);
+  }
+
+  void SetFailNewLog(bool fail) { fail_new_log_.store(fail); }
+
+ private:
+  std::atomic<bool> fail_new_log_{false};
+};
+
+}  // namespace
+
+TEST_F(DBTest, StickyMemTableSwitchError) {
+  auto flaky_env = std::make_unique<FailingLogEnv>(Env::Default());
+  Options opts;
+  opts.create_if_missing = true;
+  opts.write_buffer_size = 64 * 1024;  // 64 KB
+  opts.env = flaky_env.get();
+
+  ASSERT_TRUE(Open(opts).ok());
+
+  // Write a large value to fill memtable beyond write_buffer_size
+  std::string big_val(70 * 1024, 'x');
+  ASSERT_TRUE(Put("k_big", big_val).ok());
+
+  // Fail creating the next log file
+  flaky_env->SetFailNewLog(true);
+
+  // Next write must switch memtable and fail
+  Status s = Put("k_trigger", "v_trigger");
+  EXPECT_FALSE(s.ok());
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+
+  // Subsequent Put must return the same sticky error
+  Status s2 = Put("k_after", "v_after");
+  EXPECT_FALSE(s2.ok());
+  EXPECT_TRUE(s2.IsIOError()) << s2.ToString();
+
+  // Earlier data still readable
+  EXPECT_EQ(Get("k_big"), big_val);
 
   Close();
 }
