@@ -131,12 +131,12 @@ std::string BuildTable(const Options& options, const std::vector<Entry>& entries
 
 // Opens `contents`; *source is left pointing at the file so reads can be counted.
 Status OpenTable(const Options& options, const std::string& contents, std::unique_ptr<Table>* table,
-                 StringSource** source = nullptr) {
+                 StringSource** source = nullptr, BlockCache* block_cache = nullptr) {
   auto file = std::make_unique<StringSource>(contents);
   if (source != nullptr) {
     *source = file.get();
   }
-  return Table::Open(options, &kIcmp, std::move(file), contents.size(), table);
+  return Table::Open(options, &kIcmp, std::move(file), contents.size(), table, block_cache);
 }
 
 // The index of the first entry >= target, as InternalGet and Seek must find it.
@@ -149,7 +149,7 @@ size_t LowerBound(const std::vector<Entry>& entries, std::string_view target) {
 }
 
 void CheckTableMatchesModel(const Table& table, const std::vector<Entry>& entries, Random* rnd) {
-  std::unique_ptr<Iterator> it = table.NewIterator();
+  std::unique_ptr<Iterator> it = table.NewIterator(ReadOptions());
 
   // Forward scan, then backward (Prev crosses data block boundaries).
   it->SeekToFirst();
@@ -177,7 +177,7 @@ void CheckTableMatchesModel(const Table& table, const std::vector<Entry>& entrie
     bool found = false;
     std::string key;
     std::string value;
-    ASSERT_TRUE(table.InternalGet(e.key, &found, &key, &value).ok());
+    ASSERT_TRUE(table.InternalGet(ReadOptions(), e.key, &found, &key, &value).ok());
     ASSERT_TRUE(found);
     ASSERT_EQ(key, e.key);
     ASSERT_EQ(value, e.value);
@@ -202,7 +202,7 @@ void CheckTableMatchesModel(const Table& table, const std::vector<Entry>& entrie
     bool found = false;
     std::string key;
     std::string value;
-    ASSERT_TRUE(table.InternalGet(lookup.internal_key(), &found, &key, &value).ok());
+    ASSERT_TRUE(table.InternalGet(ReadOptions(), lookup.internal_key(), &found, &key, &value).ok());
     if (expected < entries.size() && ExtractUserKey(entries[expected].key) == user_key) {
       // The answer is in this table: the filter must not hide it.
       ASSERT_TRUE(found) << user_key;
@@ -222,14 +222,16 @@ TEST(TableTest, EmptyTable) {
   const std::string contents = BuildTable(options, {});
   std::unique_ptr<Table> table;
   ASSERT_TRUE(OpenTable(options, contents, &table).ok());
-  std::unique_ptr<Iterator> it = table->NewIterator();
+  std::unique_ptr<Iterator> it = table->NewIterator(ReadOptions());
   it->SeekToFirst();
   EXPECT_FALSE(it->Valid());
   EXPECT_TRUE(it->status().ok());
   bool found = true;
   std::string key;
   std::string value;
-  ASSERT_TRUE(table->InternalGet(MakeInternalKey("x", 1, kTypeValue), &found, &key, &value).ok());
+  ASSERT_TRUE(
+      table->InternalGet(ReadOptions(), MakeInternalKey("x", 1, kTypeValue), &found, &key, &value)
+          .ok());
   EXPECT_FALSE(found);
 }
 
@@ -278,7 +280,8 @@ TEST(TableTest, FilterIsKeyedOnUserKeys) {
     bool found = false;
     std::string key;
     std::string value;
-    ASSERT_TRUE(table->InternalGet(lookup.internal_key(), &found, &key, &value).ok());
+    ASSERT_TRUE(
+        table->InternalGet(ReadOptions(), lookup.internal_key(), &found, &key, &value).ok());
     ASSERT_TRUE(found) << UserKey(i);
     EXPECT_EQ(ExtractUserKey(key), UserKey(i));
     EXPECT_EQ(value, "v" + std::to_string(i));
@@ -305,7 +308,8 @@ TEST(TableTest, BloomFilterSkipsDataBlockReads) {
       bool found = false;
       std::string key;
       std::string value;
-      EXPECT_TRUE(table->InternalGet(lookup.internal_key(), &found, &key, &value).ok());
+      EXPECT_TRUE(
+          table->InternalGet(ReadOptions(), lookup.internal_key(), &found, &key, &value).ok());
     }
     return source->reads();
   };
@@ -378,7 +382,7 @@ TEST(TableTest, EveryCorruptedByteIsDetectedNeverMisread) {
 
     // A full scan returns a prefix-free subset of the real entries, in order,
     // and anything it cannot read is reported as Corruption.
-    std::unique_ptr<Iterator> it = table->NewIterator();
+    std::unique_ptr<Iterator> it = table->NewIterator(ReadOptions());
     size_t next = 0;
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
       const size_t pos = LowerBound(entries, it->key());
@@ -395,7 +399,7 @@ TEST(TableTest, EveryCorruptedByteIsDetectedNeverMisread) {
       bool found = false;
       std::string key;
       std::string value;
-      Status gs = table->InternalGet(e.key, &found, &key, &value);
+      Status gs = table->InternalGet(ReadOptions(), e.key, &found, &key, &value);
       if (gs.ok()) {
         ASSERT_TRUE(found) << "a stored entry vanished without an error";
         ASSERT_EQ(key, e.key);
@@ -485,11 +489,11 @@ TEST(TableTest, ConcurrentLookups) {
         bool found = false;
         std::string key;
         std::string value;
-        EXPECT_TRUE(table->InternalGet(entries[i].key, &found, &key, &value).ok());
+        EXPECT_TRUE(table->InternalGet(ReadOptions(), entries[i].key, &found, &key, &value).ok());
         EXPECT_TRUE(found);
         EXPECT_EQ(value, entries[i].value);
       }
-      std::unique_ptr<Iterator> it = table->NewIterator();
+      std::unique_ptr<Iterator> it = table->NewIterator(ReadOptions());
       size_t count = 0;
       for (it->SeekToFirst(); it->Valid(); it->Next()) {
         ++count;
@@ -500,6 +504,65 @@ TEST(TableTest, ConcurrentLookups) {
   for (std::thread& th : threads) {
     th.join();
   }
+}
+
+TEST(TableTest, SecondReadIsFreeWithBlockCache) {
+  Random rnd(1234);
+  const std::vector<Entry> entries = RandomEntries(&rnd, 500);
+  const Options options = TableOptions(256);
+  const std::string contents = BuildTable(options, entries);
+
+  BlockCache cache(size_t{1024} * 1024);
+  StringSource* source = nullptr;
+  std::unique_ptr<Table> table;
+  ASSERT_TRUE(OpenTable(options, contents, &table, &source, &cache).ok());
+  ASSERT_NE(source, nullptr);
+
+  const std::string target_key = entries[50].key;
+  bool found = false;
+  std::string k;
+  std::string v;
+
+  // 1. Read with fill_cache = false. Reads from disk, cache does not grow.
+  source->ResetReads();
+  ReadOptions no_cache_opts;
+  no_cache_opts.fill_cache = false;
+  EXPECT_TRUE(table->InternalGet(no_cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_EQ(v, entries[50].value);
+  EXPECT_GT(source->reads(), 0);
+  EXPECT_EQ(cache.TotalCharge(), 0u);
+  EXPECT_EQ(cache.hits(), 0u);
+  EXPECT_EQ(cache.misses(), 1u);
+
+  // Read again with fill_cache = false. Reads from disk again and cache still doesn't grow.
+  source->ResetReads();
+  EXPECT_TRUE(table->InternalGet(no_cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_EQ(v, entries[50].value);
+  EXPECT_GT(source->reads(), 0);
+  EXPECT_EQ(cache.TotalCharge(), 0u);
+  EXPECT_EQ(cache.misses(), 2u);
+
+  // 2. Read with fill_cache = true. Cache miss, block is read and inserted.
+  source->ResetReads();
+  ReadOptions cache_opts;
+  cache_opts.fill_cache = true;
+  EXPECT_TRUE(table->InternalGet(cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_GT(source->reads(), 0);
+  EXPECT_GT(cache.TotalCharge(), 0u);
+  EXPECT_EQ(cache.misses(), 3u);
+  EXPECT_EQ(cache.hits(), 0u);
+
+  // 3. Second read of same key. Cache hit! Exactly zero file reads!
+  source->ResetReads();
+  EXPECT_TRUE(table->InternalGet(cache_opts, target_key, &found, &k, &v).ok());
+  EXPECT_TRUE(found);
+  EXPECT_EQ(v, entries[50].value);
+  EXPECT_EQ(source->reads(), 0);
+  EXPECT_EQ(cache.misses(), 3u);
+  EXPECT_EQ(cache.hits(), 1u);
 }
 
 }  // namespace

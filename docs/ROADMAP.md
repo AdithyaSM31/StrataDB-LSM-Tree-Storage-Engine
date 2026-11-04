@@ -53,7 +53,7 @@ Tick items off as they land; each one should arrive with its tests.
 **Milestone:** TSan clean, and 1,000 kill -9 iterations pass in CI.
 
 - [x] Group commit writer queue and `sync` handling
-- [ ] Sharded LRU block cache and table cache
+- [x] Sharded LRU block cache and table cache
 - [ ] Sticky background error handling
 - [ ] `FaultInjectionEnv` with `SimulateCrash()` and error injection
 - [ ] Crash test (synced writes present, state is a prefix of history)

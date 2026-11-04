@@ -4,30 +4,37 @@
 #include <utility>
 
 #include "db/filename.h"
+#include "util/coding.h"
 
 namespace strata {
 
+std::string TableCache::TableKey(uint64_t number) {
+  std::string key;
+  PutFixed64(&key, number);
+  return key;
+}
+
 TableCache::TableCache(std::string dbname, const Options& options,
-                       const InternalKeyComparator* icmp)
+                       const InternalKeyComparator* icmp, BlockCache* block_cache)
     : env_(options.env == nullptr ? Env::Default() : options.env),
       dbname_(std::move(dbname)),
       options_(options),
-      icmp_(icmp) {}
+      icmp_(icmp),
+      block_cache_(block_cache),
+      cache_(std::make_unique<ShardedLRUCache<Table>>(
+          options_.max_open_files > 10 ? static_cast<size_t>(options_.max_open_files - 10) : 0)) {}
 
 Status TableCache::FindTable(uint64_t number, uint64_t file_size, std::shared_ptr<Table>* table) {
   if (table == nullptr) {
     return Status::InvalidArgument("table is null");
   }
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.find(number);
-    if (it != cache_.end()) {
-      *table = it->second;
-      return Status::OK();
-    }
+  const std::string key = TableKey(number);
+  *table = cache_->Lookup(key);
+  if (*table != nullptr) {
+    return Status::OK();
   }
 
-  // Open outside the lock: it reads the footer, index block and filter from
+  // Open outside the cache: it reads the footer, index block and filter from
   // disk, and lookups in tables that are already open should not wait for it.
   const std::string fname = TableFileName(dbname_, number);
   if (file_size == 0) {
@@ -42,24 +49,18 @@ Status TableCache::FindTable(uint64_t number, uint64_t file_size, std::shared_pt
     return s;
   }
   std::unique_ptr<Table> opened;
-  s = Table::Open(options_, icmp_, std::move(file), file_size, &opened);
+  s = Table::Open(options_, icmp_, std::move(file), file_size, &opened, block_cache_);
   if (!s.ok()) {
     return s;
   }
 
-  std::lock_guard<std::mutex> lock(mutex_);
   // Another thread may have opened the same table meanwhile; keep the first so
   // every reader shares one Table.
-  auto [it, inserted] = cache_.emplace(number, std::shared_ptr<Table>(std::move(opened)));
-  (void)inserted;
-  *table = it->second;
+  *table = cache_->Insert(key, std::shared_ptr<Table>(std::move(opened)), 1);
   return Status::OK();
 }
 
-void TableCache::Evict(uint64_t number) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  cache_.erase(number);
-}
+void TableCache::Erase(uint64_t number) { cache_->Erase(TableKey(number)); }
 
 namespace {
 
@@ -86,8 +87,8 @@ class TableIteratorWrapper : public Iterator {
 
 }  // namespace
 
-std::unique_ptr<Iterator> TableCache::NewIterator(uint64_t number, uint64_t file_size,
-                                                  Table** tableptr) {
+std::unique_ptr<Iterator> TableCache::NewIterator(const ReadOptions& options, uint64_t number,
+                                                  uint64_t file_size, Table** tableptr) {
   std::shared_ptr<Table> table;
   Status s = FindTable(number, file_size, &table);
   if (!s.ok()) {
@@ -96,7 +97,7 @@ std::unique_ptr<Iterator> TableCache::NewIterator(uint64_t number, uint64_t file
   if (tableptr != nullptr) {
     *tableptr = table.get();
   }
-  return std::make_unique<TableIteratorWrapper>(table, table->NewIterator());
+  return std::make_unique<TableIteratorWrapper>(table, table->NewIterator(options));
 }
 
 }  // namespace strata

@@ -82,8 +82,8 @@ namespace {
 // Looks up `key` in one table file. Returns true if this file decides the
 // answer, with *s set to: OK (and *value) for a value, NotFound for a
 // tombstone, or the error. Returns false if the key is not in this file.
-bool SearchFile(const FileMetaData* f, const LookupKey& key, std::string* value, TableCache* cache,
-                Status* s) {
+bool SearchFile(const ReadOptions& options, const FileMetaData* f, const LookupKey& key,
+                std::string* value, TableCache* cache, Status* s) {
   const std::string_view user_key = key.user_key();
   if (user_key.compare(ExtractUserKey(f->smallest)) < 0 ||
       user_key.compare(ExtractUserKey(f->largest)) > 0) {
@@ -97,7 +97,7 @@ bool SearchFile(const FileMetaData* f, const LookupKey& key, std::string* value,
   bool found = false;
   std::string found_key;
   std::string found_value;
-  *s = table->InternalGet(key.internal_key(), &found, &found_key, &found_value);
+  *s = table->InternalGet(options, key.internal_key(), &found, &found_key, &found_value);
   if (!s->ok()) {
     return true;
   }
@@ -122,12 +122,13 @@ bool SearchFile(const FileMetaData* f, const LookupKey& key, std::string* value,
 
 }  // namespace
 
-Status Version::Get(const LookupKey& key, std::string* value, TableCache* cache) const {
+Status Version::Get(const ReadOptions& options, const LookupKey& key, std::string* value,
+                    TableCache* cache) const {
   Status s;
   // L0 files may overlap, so check every one whose range covers the key,
   // newest first (files_[0] is sorted newest first).
   for (const FileMetaData* f : files_[0]) {
-    if (SearchFile(f, key, value, cache, &s)) {
+    if (SearchFile(options, f, key, value, cache, &s)) {
       return s;
     }
   }
@@ -141,7 +142,7 @@ Status Version::Get(const LookupKey& key, std::string* value, TableCache* cache)
                                [&icmp](const FileMetaData* f, std::string_view ikey) {
                                  return icmp.Compare(f->largest, ikey) < 0;
                                });
-    if (it != files.end() && SearchFile(*it, key, value, cache, &s)) {
+    if (it != files.end() && SearchFile(options, *it, key, value, cache, &s)) {
       return s;
     }
   }
@@ -902,16 +903,17 @@ class LevelFileIndexIterator : public Iterator {
 
 }  // namespace
 
-std::unique_ptr<Iterator> NewLevelFileIterator(const InternalKeyComparator* icmp, TableCache* cache,
+std::unique_ptr<Iterator> NewLevelFileIterator(const ReadOptions& options,
+                                               const InternalKeyComparator* icmp, TableCache* cache,
                                                std::vector<FileMetaData*> files) {
   auto index_iter = std::make_unique<LevelFileIndexIterator>(icmp, std::move(files));
-  auto open_file = [cache](std::string_view handle) -> std::unique_ptr<Iterator> {
+  auto open_file = [cache, options](std::string_view handle) -> std::unique_ptr<Iterator> {
     uint64_t number = 0;
     uint64_t file_size = 0;
     if (!GetVarint64(&handle, &number) || !GetVarint64(&handle, &file_size)) {
       return NewErrorIterator(Status::Corruption("corrupted file handle in level index"));
     }
-    return cache->NewIterator(number, file_size);
+    return cache->NewIterator(options, number, file_size);
   };
   return NewTwoLevelIterator(std::move(index_iter), std::move(open_file));
 }

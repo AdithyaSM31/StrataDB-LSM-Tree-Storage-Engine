@@ -203,7 +203,7 @@ bool ProcessFile(Env* env, const std::string& filename, bool verify, bool show_e
 
   bool ok = true;
   if (show_entries) {
-    std::unique_ptr<Iterator> it = table->NewIterator();
+    std::unique_ptr<Iterator> it = table->NewIterator(ReadOptions());
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
       ParsedInternalKey parsed;
       if (!ParseInternalKey(it->key(), &parsed)) {

@@ -55,6 +55,7 @@ constexpr size_t kMinWriteBufferSize = size_t{64} * 1024;
 Options SanitizeOptions(const Options& src) {
   Options result = src;
   result.write_buffer_size = std::max(result.write_buffer_size, kMinWriteBufferSize);
+  result.max_open_files = std::clamp(result.max_open_files, 64, 50000);
   return result;
 }
 
@@ -95,7 +96,10 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
       dbname_(dbname),
       icmp_(),
       imm_(nullptr),
-      table_cache_(std::make_unique<TableCache>(dbname_, options_, &icmp_)),
+      block_cache_(options_.block_cache_capacity > 0
+                       ? std::make_unique<BlockCache>(options_.block_cache_capacity)
+                       : nullptr),
+      table_cache_(std::make_unique<TableCache>(dbname_, options_, &icmp_, block_cache_.get())),
       snapshots_() {}
 
 DBImpl::~DBImpl() {
@@ -596,7 +600,7 @@ void DBImpl::RemoveObsoleteFiles() {
       }
       if (!keep) {
         if (type == FileType::kTableFile && table_cache_ != nullptr) {
-          table_cache_->Evict(number);
+          table_cache_->Erase(number);
         }
         (void)env_->RemoveFile(dbname_ + "/" + filename);
       }
@@ -766,7 +770,7 @@ Status DBImpl::Get(const ReadOptions& opts, std::string_view key, std::string* v
   // A memtable "has the answer" for a value or a tombstone alike.
   const bool in_memory = mem->Get(lkey, value, &s) || (imm != nullptr && imm->Get(lkey, value, &s));
   if (!in_memory) {
-    s = current->Get(lkey, value, table_cache_.get());
+    s = current->Get(opts, lkey, value, table_cache_.get());
   }
 
   {
@@ -825,12 +829,13 @@ std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& opts) {
     }
 
     for (FileMetaData* f : current->files(0)) {
-      list.push_back(table_cache_->NewIterator(f->number, f->file_size));
+      list.push_back(table_cache_->NewIterator(opts, f->number, f->file_size));
     }
 
     for (int level = 1; level < kNumLevels; ++level) {
       if (!current->files(level).empty()) {
-        list.push_back(NewLevelFileIterator(&icmp_, table_cache_.get(), current->files(level)));
+        list.push_back(
+            NewLevelFileIterator(opts, &icmp_, table_cache_.get(), current->files(level)));
       }
     }
   }
@@ -955,17 +960,19 @@ Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
 }
 
 std::unique_ptr<Iterator> DBImpl::MakeInputIterator(Compaction* c) {
+  ReadOptions options;
+  options.fill_cache = false;
   std::vector<std::unique_ptr<Iterator>> children;
   if (c->level() == 0) {
     // L0 files overlap each other: each one needs its own iterator.
     for (const FileMetaData* f : c->inputs(0)) {
-      children.push_back(table_cache_->NewIterator(f->number, f->file_size));
+      children.push_back(table_cache_->NewIterator(options, f->number, f->file_size));
     }
   } else if (c->num_input_files(0) > 0) {
-    children.push_back(NewLevelFileIterator(&icmp_, table_cache_.get(), c->inputs(0)));
+    children.push_back(NewLevelFileIterator(options, &icmp_, table_cache_.get(), c->inputs(0)));
   }
   if (c->num_input_files(1) > 0) {
-    children.push_back(NewLevelFileIterator(&icmp_, table_cache_.get(), c->inputs(1)));
+    children.push_back(NewLevelFileIterator(options, &icmp_, table_cache_.get(), c->inputs(1)));
   }
   return NewMergingIterator(&icmp_, std::move(children));
 }
