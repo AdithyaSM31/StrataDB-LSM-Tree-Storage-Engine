@@ -1,24 +1,47 @@
+#include <cstdint>
+#include <cstdio>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "bench/adapter.h"
 #include "strata/db.h"
+#include "strata/iterator.h"
 #include "strata/options.h"
 #include "strata/status.h"
 
 namespace strata::bench {
 
-class StrataAdapter : public BenchmarkAdapter {
+namespace {
+
+class StrataCursor : public BenchmarkCursor {
+ public:
+  explicit StrataCursor(std::unique_ptr<Iterator> iter) : iter_(std::move(iter)) {}
+
+  void Seek(std::string_view target) override { iter_->Seek(target); }
+  void Next() override { iter_->Next(); }
+  bool Valid() const override { return iter_->Valid(); }
+  std::string_view key() const override { return iter_->key(); }
+  std::string_view value() const override { return iter_->value(); }
+  Status status() const override { return iter_->status(); }
+
+ private:
+  std::unique_ptr<Iterator> iter_;
+};
+
+}  // namespace
+
+class StrataAdapter final : public BenchmarkAdapter {
  public:
   StrataAdapter() = default;
-  ~StrataAdapter() override { Close(); }
+  ~StrataAdapter() override { db_.reset(); }
 
   Status Open(const std::string& dbname, const BenchmarkOptions& options) override {
     Close();
-    dbname_ = dbname;
-    strata::Options s_opts;
+    Options s_opts;
     s_opts.create_if_missing = options.create_if_missing;
     s_opts.error_if_exists = options.error_if_exists;
     s_opts.write_buffer_size = options.write_buffer_size;
@@ -26,7 +49,6 @@ class StrataAdapter : public BenchmarkAdapter {
     s_opts.block_cache_capacity = options.block_cache_size;
     s_opts.bloom_bits_per_key = options.bloom_filter_bits;
     s_opts.max_open_files = options.max_open_files;
-
     return DB::Open(s_opts, dbname, &db_);
   }
 
@@ -54,9 +76,7 @@ class StrataAdapter : public BenchmarkAdapter {
     if (!db_) {
       return Status::InvalidArgument("DB is not open");
     }
-    ReadOptions opts;
-    opts.fill_cache = true;
-    return db_->Get(opts, key, value);
+    return db_->Get(ReadOptions(), key, value);
   }
 
   Status SyncPut(std::string_view key, std::string_view value) override {
@@ -68,51 +88,47 @@ class StrataAdapter : public BenchmarkAdapter {
     return db_->Put(opts, key, value);
   }
 
-  Status Seek(std::string_view key) override {
+  std::unique_ptr<BenchmarkCursor> NewCursor() override {
     if (!db_) {
-      return Status::InvalidArgument("DB is not open");
+      return nullptr;
     }
-    ReadOptions opts;
-    opts.fill_cache = true;
-    auto iter = db_->NewIterator(opts);
-    iter->Seek(key);
-    return iter->status();
-  }
-
-  Status Scan(std::string_view start_key, size_t limit, size_t* count) override {
-    if (!db_) {
-      return Status::InvalidArgument("DB is not open");
-    }
-    ReadOptions opts;
-    opts.fill_cache = true;
-    auto iter = db_->NewIterator(opts);
-    iter->Seek(start_key);
-    size_t c = 0;
-    while (iter->Valid() && c < limit) {
-      ++c;
-      iter->Next();
-    }
-    if (count != nullptr) {
-      *count = c;
-    }
-    return iter->status();
+    return std::make_unique<StrataCursor>(db_->NewIterator(ReadOptions()));
   }
 
   std::string Name() const override { return "StrataDB"; }
 
-  std::string GetProperty(std::string_view prop) override {
-    if (!db_) {
+  std::string Stats() override {
+    std::string stats;
+    if (!db_ || !db_->GetProperty("strata.stats", &stats)) {
       return "";
     }
-    std::string val;
-    if (db_->GetProperty(prop, &val)) {
-      return val;
+    return stats;
+  }
+
+  Status LevelShapes(std::vector<LevelShape>* shapes) override {
+    shapes->clear();
+    const std::string stats = Stats();
+    if (stats.empty()) {
+      return Status::InvalidArgument("strata.stats is not available");
     }
-    return "";
+    // Per-level rows look like "  1       5       9.91       6 ...".
+    std::istringstream lines(stats);
+    std::string line;
+    while (std::getline(lines, line)) {
+      int level = 0;
+      unsigned long long files = 0;
+      double megabytes = 0.0;
+      if (std::sscanf(line.c_str(), "%d %llu %lf", &level, &files, &megabytes) == 3) {
+        shapes->push_back({files, static_cast<uint64_t>(megabytes * 1048576.0)});
+      }
+    }
+    if (shapes->empty()) {
+      return Status::Corruption("could not parse strata.stats");
+    }
+    return Status::OK();
   }
 
  private:
-  std::string dbname_;
   std::unique_ptr<DB> db_;
 };
 

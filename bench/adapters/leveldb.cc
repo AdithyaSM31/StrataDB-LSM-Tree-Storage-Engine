@@ -1,42 +1,35 @@
+#include <cstdint>
+#include <cstdio>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "bench/adapter.h"
-
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wold-style-cast"
-#pragma GCC diagnostic ignored "-Wshadow"
-#pragma GCC diagnostic ignored "-Wconversion"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#endif
-
 #include "leveldb/cache.h"
 #include "leveldb/db.h"
 #include "leveldb/filter_policy.h"
+#include "leveldb/iterator.h"
 #include "leveldb/options.h"
-
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
 namespace strata::bench {
 
 namespace {
 
+// Conversion runs inside the timed section. NotFound is the expected result of
+// every readmissing lookup, so it must not spend time building a message that
+// the StrataDB path doesn't build.
 Status ToStrataStatus(const leveldb::Status& s) {
   if (s.ok()) {
     return Status::OK();
   }
   if (s.IsNotFound()) {
-    return Status::NotFound(s.ToString());
+    return Status::NotFound("");
   }
   if (s.IsCorruption()) {
     return Status::Corruption(s.ToString());
-  }
-  if (s.IsIOError()) {
-    return Status::IOError(s.ToString());
   }
   if (s.IsInvalidArgument()) {
     return Status::InvalidArgument(s.ToString());
@@ -47,16 +40,46 @@ Status ToStrataStatus(const leveldb::Status& s) {
   return Status::IOError(s.ToString());
 }
 
+leveldb::Slice ToSlice(std::string_view s) { return {s.data(), s.size()}; }
+
+// StrataDB verifies the checksum of every block it reads and has no way to turn
+// that off, so LevelDB must do the same work on the same reads.
+leveldb::ReadOptions VerifyingReadOptions() {
+  leveldb::ReadOptions opts;
+  opts.verify_checksums = true;
+  return opts;
+}
+
+class LevelDBCursor : public BenchmarkCursor {
+ public:
+  explicit LevelDBCursor(leveldb::Iterator* iter) : iter_(iter) {}
+
+  void Seek(std::string_view target) override { iter_->Seek(ToSlice(target)); }
+  void Next() override { iter_->Next(); }
+  bool Valid() const override { return iter_->Valid(); }
+  std::string_view key() const override {
+    const leveldb::Slice k = iter_->key();
+    return {k.data(), k.size()};
+  }
+  std::string_view value() const override {
+    const leveldb::Slice v = iter_->value();
+    return {v.data(), v.size()};
+  }
+  Status status() const override { return ToStrataStatus(iter_->status()); }
+
+ private:
+  std::unique_ptr<leveldb::Iterator> iter_;
+};
+
 }  // namespace
 
-class LevelDBAdapter : public BenchmarkAdapter {
+class LevelDBAdapter final : public BenchmarkAdapter {
  public:
   LevelDBAdapter() = default;
-  ~LevelDBAdapter() override { Close(); }
+  ~LevelDBAdapter() override { CloseDatabase(); }
 
   Status Open(const std::string& dbname, const BenchmarkOptions& options) override {
     Close();
-    dbname_ = dbname;
     leveldb::Options l_opts;
     l_opts.create_if_missing = options.create_if_missing;
     l_opts.error_if_exists = options.error_if_exists;
@@ -64,127 +87,127 @@ class LevelDBAdapter : public BenchmarkAdapter {
     l_opts.block_size = options.block_size;
     l_opts.max_open_files = options.max_open_files;
 
-    // CRITICAL FAIRNESS RULE:
-    // StrataDB does not compress; disable LevelDB compression so comparison is fair.
+    // StrataDB does not compress.
     l_opts.compression = leveldb::kNoCompression;
 
-    if (options.block_cache_size > 0) {
-      cache_ = leveldb::NewLRUCache(options.block_cache_size);
-      l_opts.block_cache = cache_;
-    }
+    // Makes compactions verify the blocks they read, as StrataDB's do.
+    l_opts.paranoid_checks = true;
+
+    // Always pass a cache: with none, LevelDB creates its own 8 MB cache, while
+    // capacity 0 really does turn caching off.
+    cache_.reset(leveldb::NewLRUCache(options.block_cache_size));
+    l_opts.block_cache = cache_.get();
+
     if (options.bloom_filter_bits > 0) {
-      filter_policy_ = leveldb::NewBloomFilterPolicy(options.bloom_filter_bits);
-      l_opts.filter_policy = filter_policy_;
+      filter_policy_.reset(leveldb::NewBloomFilterPolicy(options.bloom_filter_bits));
+      l_opts.filter_policy = filter_policy_.get();
     }
 
     leveldb::DB* raw_db = nullptr;
-    leveldb::Status s = leveldb::DB::Open(l_opts, dbname, &raw_db);
+    const leveldb::Status s = leveldb::DB::Open(l_opts, dbname, &raw_db);
     if (!s.ok()) {
-      delete cache_;
-      cache_ = nullptr;
-      delete filter_policy_;
-      filter_policy_ = nullptr;
+      cache_.reset();
+      filter_policy_.reset();
       return ToStrataStatus(s);
     }
-    db_ = raw_db;
+    db_.reset(raw_db);
     return Status::OK();
   }
 
-  void Close() override {
-    delete db_;
-    db_ = nullptr;
-    delete cache_;
-    cache_ = nullptr;
-    delete filter_policy_;
-    filter_policy_ = nullptr;
-  }
+  void Close() override { CloseDatabase(); }
 
   Status Put(std::string_view key, std::string_view value) override {
-    if (!db_) {
+    if (db_ == nullptr) {
       return Status::InvalidArgument("DB is not open");
     }
     leveldb::WriteOptions opts;
     opts.sync = false;
-    return ToStrataStatus(db_->Put(opts, leveldb::Slice(key.data(), key.size()),
-                                   leveldb::Slice(value.data(), value.size())));
+    return ToStrataStatus(db_->Put(opts, ToSlice(key), ToSlice(value)));
   }
 
   Status Delete(std::string_view key) override {
-    if (!db_) {
+    if (db_ == nullptr) {
       return Status::InvalidArgument("DB is not open");
     }
     leveldb::WriteOptions opts;
     opts.sync = false;
-    return ToStrataStatus(db_->Delete(opts, leveldb::Slice(key.data(), key.size())));
+    return ToStrataStatus(db_->Delete(opts, ToSlice(key)));
   }
 
   Status Get(std::string_view key, std::string* value) override {
-    if (!db_) {
+    if (db_ == nullptr) {
       return Status::InvalidArgument("DB is not open");
     }
-    leveldb::ReadOptions opts;
-    opts.fill_cache = true;
-    return ToStrataStatus(db_->Get(opts, leveldb::Slice(key.data(), key.size()), value));
+    return ToStrataStatus(db_->Get(VerifyingReadOptions(), ToSlice(key), value));
   }
 
   Status SyncPut(std::string_view key, std::string_view value) override {
-    if (!db_) {
+    if (db_ == nullptr) {
       return Status::InvalidArgument("DB is not open");
     }
     leveldb::WriteOptions opts;
     opts.sync = true;
-    return ToStrataStatus(db_->Put(opts, leveldb::Slice(key.data(), key.size()),
-                                   leveldb::Slice(value.data(), value.size())));
+    return ToStrataStatus(db_->Put(opts, ToSlice(key), ToSlice(value)));
   }
 
-  Status Seek(std::string_view key) override {
-    if (!db_) {
-      return Status::InvalidArgument("DB is not open");
+  std::unique_ptr<BenchmarkCursor> NewCursor() override {
+    if (db_ == nullptr) {
+      return nullptr;
     }
-    leveldb::ReadOptions opts;
-    opts.fill_cache = true;
-    std::unique_ptr<leveldb::Iterator> iter(db_->NewIterator(opts));
-    iter->Seek(leveldb::Slice(key.data(), key.size()));
-    return ToStrataStatus(iter->status());
-  }
-
-  Status Scan(std::string_view start_key, size_t limit, size_t* count) override {
-    if (!db_) {
-      return Status::InvalidArgument("DB is not open");
-    }
-    leveldb::ReadOptions opts;
-    opts.fill_cache = true;
-    std::unique_ptr<leveldb::Iterator> iter(db_->NewIterator(opts));
-    iter->Seek(leveldb::Slice(start_key.data(), start_key.size()));
-    size_t c = 0;
-    while (iter->Valid() && c < limit) {
-      ++c;
-      iter->Next();
-    }
-    if (count != nullptr) {
-      *count = c;
-    }
-    return ToStrataStatus(iter->status());
+    return std::make_unique<LevelDBCursor>(db_->NewIterator(VerifyingReadOptions()));
   }
 
   std::string Name() const override { return "LevelDB"; }
 
-  std::string GetProperty(std::string_view prop) override {
-    if (!db_) {
+  std::string Stats() override {
+    std::string stats;
+    if (db_ == nullptr || !db_->GetProperty("leveldb.stats", &stats)) {
       return "";
     }
-    std::string val;
-    if (db_->GetProperty(leveldb::Slice(prop.data(), prop.size()), &val)) {
-      return val;
+    return stats;
+  }
+
+  Status LevelShapes(std::vector<LevelShape>* shapes) override {
+    shapes->clear();
+    if (db_ == nullptr) {
+      return Status::InvalidArgument("DB is not open");
     }
-    return "";
+    std::string sstables;
+    if (!db_->GetProperty("leveldb.sstables", &sstables)) {
+      return Status::NotSupported("leveldb.sstables is not available");
+    }
+    // Sections look like "--- level 1 ---" followed by " 17:2097152['a' .. 'd']".
+    std::istringstream lines(sstables);
+    std::string line;
+    while (std::getline(lines, line)) {
+      int level = 0;
+      unsigned long long number = 0;
+      unsigned long long size = 0;
+      if (std::sscanf(line.c_str(), "--- level %d ---", &level) == 1) {
+        shapes->emplace_back();
+      } else if (std::sscanf(line.c_str(), " %llu:%llu[", &number, &size) == 2 &&
+                 !shapes->empty()) {
+        shapes->back().files += 1;
+        shapes->back().bytes += size;
+      }
+    }
+    if (shapes->empty()) {
+      return Status::Corruption("could not parse leveldb.sstables");
+    }
+    return Status::OK();
   }
 
  private:
-  std::string dbname_;
-  leveldb::DB* db_ = nullptr;
-  leveldb::Cache* cache_ = nullptr;
-  const leveldb::FilterPolicy* filter_policy_ = nullptr;
+  // The database uses the cache and the filter policy, so it must go first.
+  void CloseDatabase() {
+    db_.reset();
+    cache_.reset();
+    filter_policy_.reset();
+  }
+
+  std::unique_ptr<const leveldb::FilterPolicy> filter_policy_;
+  std::unique_ptr<leveldb::Cache> cache_;
+  std::unique_ptr<leveldb::DB> db_;
 };
 
 std::unique_ptr<BenchmarkAdapter> CreateLevelDBAdapter() {

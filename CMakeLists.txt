@@ -115,6 +115,14 @@ if(STRATA_BUILD_BENCH)
   set(LEVELDB_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(leveldb)
 
+  # LevelDB 1.23 picks up our C++20 setting, and with assert() enabled it doesn't
+  # compile as C++20. Treat its headers as system headers so our warning flags and
+  # clang-tidy leave them alone.
+  set_target_properties(leveldb PROPERTIES CXX_STANDARD 17)
+  get_target_property(LEVELDB_INCLUDE_DIRS leveldb INTERFACE_INCLUDE_DIRECTORIES)
+  set_target_properties(leveldb PROPERTIES
+    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${LEVELDB_INCLUDE_DIRS}")
+
   file(GLOB STRATA_BENCH_SOURCES CONFIGURE_DEPENDS
        "${PROJECT_SOURCE_DIR}/bench/*.cc"
        "${PROJECT_SOURCE_DIR}/bench/adapters/*.cc")
@@ -128,6 +136,42 @@ if(STRATA_BUILD_BENCH)
     leveldb
     Threads::Threads)
   strata_configure_target(strata_bench)
+
+  # LevelDB is built with -fno-rtti, so UBSan's vptr check can't link against it.
+  set_source_files_properties("${PROJECT_SOURCE_DIR}/bench/adapters/leveldb.cc"
+    TARGET_DIRECTORY strata_bench
+    PROPERTIES COMPILE_OPTIONS "-fno-sanitize=vptr")
+
+  # Every run records the commit it measures and what LevelDB was built with: an
+  # installed crc32c library, for one, gives LevelDB hardware checksums. Committing
+  # updates .git/index, which re-runs configure and so refreshes the commit.
+  set(STRATA_BENCH_COMMIT "unknown")
+  find_package(Git QUIET)
+  if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git/index")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                 "${PROJECT_SOURCE_DIR}/.git/index")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      OUTPUT_VARIABLE STRATA_BENCH_GIT_HEAD
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(STRATA_BENCH_GIT_HEAD)
+      set(STRATA_BENCH_COMMIT "${STRATA_BENCH_GIT_HEAD}")
+    endif()
+  endif()
+  set(STRATA_BENCH_LEVELDB_FEATURES "1.23")
+  foreach(feature IN ITEMS CRC32C SNAPPY TCMALLOC)
+    string(TOLOWER "${feature}" feature_name)
+    if(HAVE_${feature})
+      string(APPEND STRATA_BENCH_LEVELDB_FEATURES " ${feature_name}=yes")
+    else()
+      string(APPEND STRATA_BENCH_LEVELDB_FEATURES " ${feature_name}=no")
+    endif()
+  endforeach()
+  target_compile_definitions(strata_bench PRIVATE
+    "STRATA_BENCH_COMMIT=\"${STRATA_BENCH_COMMIT}\""
+    "STRATA_BENCH_LEVELDB_FEATURES=\"${STRATA_BENCH_LEVELDB_FEATURES}\"")
 endif()
 
 # ---------------------------------------------------------------------------

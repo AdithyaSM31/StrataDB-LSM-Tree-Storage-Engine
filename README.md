@@ -21,7 +21,7 @@ ctest --preset debug          # add -L unit or -L slow to filter
 | `asan`    | AddressSanitizer + UndefinedBehaviorSanitizer, `-Werror`           |
 | `tsan`    | ThreadSanitizer, `-Werror`                                         |
 | `release` | `-O2`, debug checks compiled out, `-Werror`                        |
-| `bench`   | `-O3 -DNDEBUG`, builds `strata_bench` and fetches LevelDB 1.23     |
+| `bench`   | `-O2 -g -fno-omit-frame-pointer` for `perf` flame graphs, builds `strata_bench`, fetches LevelDB 1.23 |
 
 CI runs `asan`, `tsan` and `release` (GCC and Clang) plus a `clang-format` check on every push.
 
@@ -91,24 +91,44 @@ Quick smoke run:
 ./build/bench/strata_bench --num=10000 --engine=both --benchmarks=fillseq,readrandom --threads=2
 ```
 
-Inspect engine stats after run:
+Print each engine's stats, including write amplification, after a fill. Stats are printed after write workloads, once compactions finish, because their counters reset when the database reopens:
 
 ```bash
-./build/bench/strata_bench --num=10000 --engine=strata --benchmarks=fillrandom,readrandom --stats
+./build/bench/strata_bench --num=1000000 --benchmarks=fillrandom --stats
 ```
+
+`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). Run `strata_bench --help` for every option.
 
 ### Supported Workloads
 
 - **Writes**: `fillseq`, `fillrandom`, `overwrite`, `fillsync`
-- **Reads**: `readrandom`, `readmissing`, `readseq`, `seekrandom`, `scan`
-- **Mixed**: `readwhilewriting` (concurrent writer thread + reader threads)
+- **Reads**:
+  - `readrandom`: point lookups of keys that exist.
+  - `readmissing`: lookups of keys that don't exist but fall inside the stored key range, so they exercise the bloom filters.
+  - `readseq`: walks the whole key space with an iterator.
+  - `seekrandom`: one seek per operation.
+  - `scan`: a seek plus 100 entries per operation.
+- **Mixed**: `readwhilewriting`: reader threads alongside one writer held to `--write_rate` (default 10,000 writes/s, 0 for no limit). The rate the writer reached is reported with the row.
 
-### Fairness Guarantees
+### Datasets
 
-- **No Compression**: LevelDB compression is explicitly disabled (`leveldb::kNoCompression`) to ensure fair comparison since StrataDB does not compress.
-- **Identical PRNG Streams**: Worker threads share deterministic seed offsets across engines so both process identical key sequences.
-- **Zero Measurement Contention**: Each worker thread times individual operations into its own log-scale `Histogram` without locks; histograms are merged after completion.
-- **Results Export**: Formatted summary table printed to stdout and full metrics exported to CSV under `bench/results/benchmarks.csv`.
+Read workloads reuse the dataset left by an earlier fill only if it was built with the same `--num`, `--value_size`, `--write_buffer_size`, `--block_size`, `--bloom_bits` and `--threads`; otherwise it is rebuilt with `fillrandom`. `--cache_size` and `--max_open_files` can vary over one dataset. Workloads that change the data mark the dataset invalid first.
+
+Before each read workload the database is reopened, leaving the block cache cold, and the harness waits until no level is over its compaction target. The CSV records which fill made the dataset (`dataset`) and the files per level at the start (`levels_at_start`). LevelDB also compacts in response to reads, which StrataDB doesn't, so its shape can change during one read workload and differ at the start of the next.
+
+### Failures
+
+Every read is checked: keys must be found with the right value size, missing keys must be missing, and seeks and scans must land where expected. If any operation fails, the row shows the error count and is left out of the CSV, and `strata_bench` exits 1. Bad arguments exit 2. A database that fails to open is reported and never deleted.
+
+### Fairness
+
+- **Compression**: off on both engines, since StrataDB doesn't compress.
+- **Checksums**: every block read is verified on both engines, since StrataDB can't turn that off. LevelDB's default is not to verify, so the adapter sets `verify_checksums` and `paranoid_checks`.
+- **Block cache**: `--cache_size=0` disables it on both engines.
+- **Key sequences**: the same seeds give both engines the same keys in the same order.
+- **Latency recording**: each thread has its own `Histogram` on its own cache lines; they are merged after the run.
+
+Each run prints its options, the commit and LevelDB's optional dependencies. Results are appended to `bench/results/benchmarks.csv` with a run ID and the options, so repeat runs can be told apart.
 
 ## Durability
 

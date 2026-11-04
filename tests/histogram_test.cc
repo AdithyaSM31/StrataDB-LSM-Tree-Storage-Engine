@@ -2,7 +2,8 @@
 
 #include <gtest/gtest.h>
 
-#include <cmath>
+#include <limits>
+#include <string>
 
 namespace strata {
 
@@ -162,6 +163,71 @@ TEST(HistogramTest, ExactBucketBoundaries) {
   std::string str = h.ToString();
   EXPECT_FALSE(str.empty());
   EXPECT_NE(str.find("Percentiles:"), std::string::npos);
+}
+
+TEST(HistogramTest, MergeTakesTheWiderRange) {
+  Histogram narrow;
+  narrow.Add(100.0);
+  Histogram wide;
+  wide.Add(10.0);
+  wide.Add(1000.0);
+
+  narrow.Merge(wide);
+
+  EXPECT_DOUBLE_EQ(narrow.Min(), 10.0);
+  EXPECT_DOUBLE_EQ(narrow.Max(), 1000.0);
+}
+
+TEST(HistogramTest, PercentileInterpolatesWithinABucket) {
+  // Evenly spread across one bucket, [100, 110), so interpolation decides the answer.
+  Histogram h;
+  for (int i = 0; i < 1000; ++i) {
+    h.Add(100.0 + i * 0.01);
+  }
+  EXPECT_NEAR(h.Percentile(25.0), 102.5, 0.01);
+  EXPECT_NEAR(h.Percentile(50.0), 105.0, 0.01);
+  EXPECT_NEAR(h.Percentile(75.0), 107.5, 0.01);
+}
+
+TEST(HistogramTest, PercentileStaysWithinObservedValues) {
+  // Interpolation alone would give about 40.05 and 44.95 for values in [40, 45).
+  Histogram h;
+  for (int i = 0; i < 100; ++i) {
+    h.Add(42.5);
+  }
+  EXPECT_DOUBLE_EQ(h.Percentile(1.0), 42.5);
+  EXPECT_DOUBLE_EQ(h.Percentile(99.0), 42.5);
+}
+
+TEST(HistogramTest, ValueOnABoundaryBelongsToTheBucketAboveIt) {
+  // 10 is the bottom of [10, 11). Counted in [9.5, 10) instead, the median would
+  // interpolate below 10 and be clamped to exactly 10.
+  Histogram h;
+  for (int i = 0; i < 100; ++i) {
+    h.Add(10.0);
+  }
+  h.Add(1000.0);
+  EXPECT_GT(h.Percentile(50.0), 10.0);
+  EXPECT_LT(h.Percentile(50.0), 11.0);
+}
+
+TEST(HistogramTest, ValuesAboveTheLastBucketStillInterpolateUpToTheMax) {
+  // Past the last limit (1e9 us) the only upper bound available is the maximum.
+  Histogram h;
+  for (int i = 0; i < 50; ++i) {
+    h.Add(1.5e9);
+    h.Add(3.0e9);
+  }
+  EXPECT_NEAR(h.Percentile(75.0), 2.5e9, 1e6);
+  EXPECT_DOUBLE_EQ(h.Max(), 3.0e9);
+}
+
+TEST(HistogramTest, NegativeValuesCountAsZero) {
+  Histogram h;
+  h.Add(-5.0);
+  EXPECT_DOUBLE_EQ(h.num(), 1.0);
+  EXPECT_DOUBLE_EQ(h.Min(), 0.0);
+  EXPECT_DOUBLE_EQ(h.Average(), 0.0);
 }
 
 }  // namespace strata

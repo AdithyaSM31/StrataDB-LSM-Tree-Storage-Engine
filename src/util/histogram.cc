@@ -50,14 +50,6 @@ double Histogram::BucketLower(size_t i) {
   return limits.back();
 }
 
-double Histogram::BucketUpper(size_t i) {
-  const auto& limits = BucketLimits();
-  if (i < limits.size()) {
-    return limits[i];
-  }
-  return std::numeric_limits<double>::infinity();
-}
-
 void Histogram::Clear() {
   min_ = std::numeric_limits<double>::max();
   max_ = 0.0;

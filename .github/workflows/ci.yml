@@ -53,9 +53,14 @@ jobs:
         run: ctest --preset ${{ matrix.preset }}
 
       - name: Benchmark smoke test
-        if: matrix.preset == 'release' && matrix.cxx == 'g++'
+        if: matrix.preset == 'release'
         run: |
           cmake --preset bench
           cmake --build --preset bench --target strata_bench
-          ./build/bench/strata_bench --num=10000 --benchmarks=fillseq,readseq,fillrandom,readrandom,readmissing,seekrandom,overwrite,readwhilewriting,fillsync
-
+          # Any failed operation makes this exit non-zero and fails the job.
+          ./build/bench/strata_bench --num=10000 --sync_num=200 --threads=2 --benchmarks=all
+          # A bad workload name has to be rejected, not skipped.
+          if ./build/bench/strata_bench --benchmarks=nosuch; then
+            echo "strata_bench accepted an unknown workload"
+            exit 1
+          fi

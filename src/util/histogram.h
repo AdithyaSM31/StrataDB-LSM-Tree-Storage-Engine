@@ -32,7 +32,6 @@ class Histogram {
 
  private:
   static double BucketLower(size_t i);
-  static double BucketUpper(size_t i);
 
   double min_;
   double max_;
