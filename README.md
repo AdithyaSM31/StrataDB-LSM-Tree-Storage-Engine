@@ -3,8 +3,7 @@
 An embedded key-value storage engine in C++20, built as a log-structured merge tree:
 write-ahead log, skiplist memtable, SSTables with bloom filters, and leveled compaction.
 
-> Status: **Week 1, setting up.** The build, test and CI scaffolding is in place;
-> the engine itself is being written. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> Status: **Week 5: benchmarks, profiling and write-up.** Standalone benchmark harness with LevelDB adapter in place. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Build and test
 
@@ -89,13 +88,19 @@ Run all workloads across both engines:
 Quick smoke run:
 
 ```bash
-./build/bench/strata_bench --num=10000 --engine=both --benchmarks=fillseq,readrandom
+./build/bench/strata_bench --num=10000 --engine=both --benchmarks=fillseq,readrandom --threads=2
+```
+
+Inspect engine stats after run:
+
+```bash
+./build/bench/strata_bench --num=10000 --engine=strata --benchmarks=fillrandom,readrandom --stats
 ```
 
 ### Supported Workloads
 
 - **Writes**: `fillseq`, `fillrandom`, `overwrite`, `fillsync`
-- **Reads**: `readrandom`, `readmissing`, `readseq`, `seekrandom`
+- **Reads**: `readrandom`, `readmissing`, `readseq`, `seekrandom`, `scan`
 - **Mixed**: `readwhilewriting` (concurrent writer thread + reader threads)
 
 ### Fairness Guarantees

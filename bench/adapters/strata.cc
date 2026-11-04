@@ -33,30 +33,45 @@ class StrataAdapter : public BenchmarkAdapter {
   void Close() override { db_.reset(); }
 
   Status Put(std::string_view key, std::string_view value) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     WriteOptions opts;
     opts.sync = false;
     return db_->Put(opts, key, value);
   }
 
   Status Delete(std::string_view key) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     WriteOptions opts;
     opts.sync = false;
     return db_->Delete(opts, key);
   }
 
   Status Get(std::string_view key, std::string* value) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     ReadOptions opts;
     opts.fill_cache = true;
     return db_->Get(opts, key, value);
   }
 
   Status SyncPut(std::string_view key, std::string_view value) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     WriteOptions opts;
     opts.sync = true;
     return db_->Put(opts, key, value);
   }
 
   Status Seek(std::string_view key) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     ReadOptions opts;
     opts.fill_cache = true;
     auto iter = db_->NewIterator(opts);
@@ -65,6 +80,9 @@ class StrataAdapter : public BenchmarkAdapter {
   }
 
   Status Scan(std::string_view start_key, size_t limit, size_t* count) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     ReadOptions opts;
     opts.fill_cache = true;
     auto iter = db_->NewIterator(opts);

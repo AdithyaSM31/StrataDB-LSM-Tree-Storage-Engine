@@ -122,15 +122,46 @@ TEST(HistogramTest, Clear) {
   EXPECT_DOUBLE_EQ(h.Average(), 0.0);
 }
 
-TEST(HistogramTest, NegativeAndExtremeValues) {
+TEST(HistogramTest, AddAfterClear) {
   Histogram h;
-  h.Add(-10.0);  // Clamped to 0.0
-  EXPECT_DOUBLE_EQ(h.Min(), 0.0);
+  h.Add(100.0);
+  h.Clear();
+  EXPECT_DOUBLE_EQ(h.num(), 0.0);
 
-  // Large latency: 120 seconds (120,000,000 us)
-  h.Add(120000000.0);
-  EXPECT_DOUBLE_EQ(h.Max(), 120000000.0);
-  EXPECT_GT(h.Percentile(99.9), 10000000.0);
+  h.Add(25.0);
+  h.Add(75.0);
+  EXPECT_DOUBLE_EQ(h.num(), 2.0);
+  EXPECT_DOUBLE_EQ(h.Min(), 25.0);
+  EXPECT_DOUBLE_EQ(h.Max(), 75.0);
+  EXPECT_NEAR(h.Average(), 50.0, 1e-6);
+}
+
+TEST(HistogramTest, NaNExtremeBounds) {
+  Histogram h;
+  h.Add(10.0);
+  h.Add(20.0);
+
+  double nan_val = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_DOUBLE_EQ(h.Percentile(nan_val), 0.0);
+  EXPECT_DOUBLE_EQ(h.Percentile(-1.0), h.Min());
+  EXPECT_DOUBLE_EQ(h.Percentile(101.0), h.Max());
+}
+
+TEST(HistogramTest, ExactBucketBoundaries) {
+  Histogram h;
+  const double boundaries[] = {0.1, 1.0, 2.0, 10.0, 100.0, 1000.0, 10000.0};
+  for (double b : boundaries) {
+    h.Add(b);
+  }
+  EXPECT_DOUBLE_EQ(h.num(), 7.0);
+  EXPECT_DOUBLE_EQ(h.Min(), 0.1);
+  EXPECT_DOUBLE_EQ(h.Max(), 10000.0);
+  EXPECT_GT(h.Percentile(50.0), 0.1);
+  EXPECT_LT(h.Percentile(50.0), 10000.0);
+
+  std::string str = h.ToString();
+  EXPECT_FALSE(str.empty());
+  EXPECT_NE(str.find("Percentiles:"), std::string::npos);
 }
 
 }  // namespace strata

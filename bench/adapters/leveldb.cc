@@ -100,6 +100,9 @@ class LevelDBAdapter : public BenchmarkAdapter {
   }
 
   Status Put(std::string_view key, std::string_view value) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     leveldb::WriteOptions opts;
     opts.sync = false;
     return ToStrataStatus(db_->Put(opts, leveldb::Slice(key.data(), key.size()),
@@ -107,18 +110,27 @@ class LevelDBAdapter : public BenchmarkAdapter {
   }
 
   Status Delete(std::string_view key) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     leveldb::WriteOptions opts;
     opts.sync = false;
     return ToStrataStatus(db_->Delete(opts, leveldb::Slice(key.data(), key.size())));
   }
 
   Status Get(std::string_view key, std::string* value) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     leveldb::ReadOptions opts;
     opts.fill_cache = true;
     return ToStrataStatus(db_->Get(opts, leveldb::Slice(key.data(), key.size()), value));
   }
 
   Status SyncPut(std::string_view key, std::string_view value) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     leveldb::WriteOptions opts;
     opts.sync = true;
     return ToStrataStatus(db_->Put(opts, leveldb::Slice(key.data(), key.size()),
@@ -126,6 +138,9 @@ class LevelDBAdapter : public BenchmarkAdapter {
   }
 
   Status Seek(std::string_view key) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     leveldb::ReadOptions opts;
     opts.fill_cache = true;
     std::unique_ptr<leveldb::Iterator> iter(db_->NewIterator(opts));
@@ -134,6 +149,9 @@ class LevelDBAdapter : public BenchmarkAdapter {
   }
 
   Status Scan(std::string_view start_key, size_t limit, size_t* count) override {
+    if (!db_) {
+      return Status::InvalidArgument("DB is not open");
+    }
     leveldb::ReadOptions opts;
     opts.fill_cache = true;
     std::unique_ptr<leveldb::Iterator> iter(db_->NewIterator(opts));

@@ -12,8 +12,8 @@ namespace strata {
 namespace {
 
 const std::vector<double>& BucketLimits() {
-  static const auto* const limits = []() {
-    auto* v = new std::vector<double>();
+  static const auto limits = []() {
+    std::vector<double> v;
     const double kSteps[] = {1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0,
                              2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.4, 3.6, 3.8, 4.0, 4.5,
                              5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0};
@@ -21,15 +21,15 @@ const std::vector<double>& BucketLimits() {
     for (int d = 0; d < 10; ++d) {
       for (double step : kSteps) {
         double limit = base * step;
-        if (v->empty() || limit > v->back() * 1.000001) {
-          v->push_back(limit);
+        if (v.empty() || limit > v.back() * 1.000001) {
+          v.push_back(limit);
         }
       }
       base *= 10.0;
     }
     return v;
   }();
-  return *limits;
+  return limits;
 }
 
 }  // namespace
@@ -107,6 +107,9 @@ void Histogram::Merge(const Histogram& other) {
   num_ += other.num_;
   sum_ += other.sum_;
   sum_squares_ += other.sum_squares_;
+  if (buckets_.size() < other.buckets_.size()) {
+    buckets_.resize(other.buckets_.size(), 0.0);
+  }
   for (size_t i = 0; i < buckets_.size() && i < other.buckets_.size(); ++i) {
     buckets_[i] += other.buckets_[i];
   }
@@ -127,7 +130,7 @@ double Histogram::StandardDeviation() const {
 }
 
 double Histogram::Percentile(double p) const {
-  if (num_ <= 0.0) {
+  if (num_ <= 0.0 || std::isnan(p)) {
     return 0.0;
   }
   if (p <= 0.0) {
@@ -165,7 +168,7 @@ double Histogram::Percentile(double p) const {
 
 std::string Histogram::ToString() const {
   std::string r;
-  char buf[256];
+  char buf[512];
   std::snprintf(buf, sizeof(buf),
                 "Count: %.0f  Average: %.4f  StdDev: %.4f\n"
                 "Min: %.4f  Median: %.4f  Max: %.4f\n"
