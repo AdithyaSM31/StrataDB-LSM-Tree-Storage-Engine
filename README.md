@@ -97,7 +97,7 @@ Print each engine's stats, including write amplification, after a fill. Stats ar
 ./build/bench/strata_bench --num=1000000 --benchmarks=fillrandom --stats
 ```
 
-`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). Run `strata_bench --help` for every option.
+`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). YCSB workloads can be tuned with `--ycsb_ops=N` (defaults to `--num`) and `--zipf_theta=F` (skew parameter in `(0, 1)`, default `0.99`). Run `strata_bench --help` for every option.
 
 ### Supported Workloads
 
@@ -108,6 +108,10 @@ Print each engine's stats, including write amplification, after a fill. Stats ar
   - `readseq`: walks the whole key space with an iterator.
   - `seekrandom`: one seek per operation.
   - `scan`: a seek plus 100 entries per operation.
+- **YCSB (Zipfian skew)**:
+  - `ycsbc`: 100% reads (read-only).
+  - `ycsbb`: 95% reads, 5% updates.
+  - `ycsba`: 50% reads, 50% updates.
 - **Mixed**: `readwhilewriting`: reader threads alongside one writer held to `--write_rate` (default 10,000 writes/s, 0 for no limit). The rate the writer reached is reported with the row.
 
 ### Datasets
@@ -128,7 +132,7 @@ Every read is checked: keys must be found with the right value size, missing key
 - **Key sequences**: the same seeds give both engines the same keys in the same order.
 - **Latency recording**: each thread has its own `Histogram` on its own cache lines; they are merged after the run.
 
-Each run prints its options, the commit and LevelDB's optional dependencies. Results are appended to `bench/results/benchmarks.csv` with a run ID and the options, so repeat runs can be told apart.
+Each run prints its options, the commit and LevelDB's optional dependencies. Results are appended to `bench/results/benchmarks.csv` with a run ID and the options, so repeat runs can be told apart. YCSB rows also record the skew, the read and update counts, and each side's latency percentiles.
 
 ## Durability
 

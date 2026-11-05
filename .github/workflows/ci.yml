@@ -58,9 +58,16 @@ jobs:
           cmake --preset bench
           cmake --build --preset bench --target strata_bench
           # Any failed operation makes this exit non-zero and fails the job.
-          ./build/bench/strata_bench --num=10000 --sync_num=200 --threads=2 --benchmarks=all
+          ./build/bench/strata_bench --num=10000 --sync_num=200 --ycsb_ops=100000 --threads=2 --benchmarks=all
+          # Each YCSB row has to have run the read/update mix it claims.
+          awk -f bench/check_ycsb_mix.awk bench/results/benchmarks.csv
           # A bad workload name has to be rejected, not skipped.
           if ./build/bench/strata_bench --benchmarks=nosuch; then
             echo "strata_bench accepted an unknown workload"
+            exit 1
+          fi
+          # So does a skew that fails every range comparison.
+          if ./build/bench/strata_bench --zipf_theta=nan --benchmarks=ycsbc; then
+            echo "strata_bench accepted a NaN theta"
             exit 1
           fi
