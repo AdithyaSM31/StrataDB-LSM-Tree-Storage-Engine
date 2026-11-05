@@ -1,0 +1,33 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261105T130030Z
+Commit:          96c8e3c6d3b3
+Engines:         strata
+Benchmarks:      seekrandom
+Entries:         1000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+YCSB Ops:        1000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /home/adith/strata_bench_data
+CSV Output:      /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/memory.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   seekrandom              1      63162.3      6.99     10.88     79.57     276.45       0  fillrandom
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/memory.csv

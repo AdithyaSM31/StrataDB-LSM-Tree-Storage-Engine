@@ -1,0 +1,53 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261105T125934Z
+Commit:          96c8e3c6d3b3
+Engines:         strata
+Benchmarks:      overwrite
+Entries:         1000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+YCSB Ops:        1000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /home/adith/strata_bench_data
+CSV Output:      /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/memory.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   overwrite               1     125864.0     13.92      1.19      3.80    1174.58       0  fillrandom
+
+--- StrataDB Stats ---
+                               Compactions
+Level  Files   Size(MB)   Count    Read(MB)   Write(MB)
+-------------------------------------------------------
+  0       0       0.00       5      189.21      185.58
+  1       4       8.17      53      427.53      332.84
+  2      49      98.51       6        4.08        2.09
+  3       8      14.35       0        0.00        0.00
+  4       0       0.00       0        0.00        0.00
+  5       0       0.00       0        0.00        0.00
+  6       0       0.00       0        0.00        0.00
+-------------------------------------------------------
+Total files: 61, Total size: 121.03 MB
+Flush count: 35, Compaction count: 64
+Compaction read: 620.83 MB, write: 520.51 MB
+User bytes written: 124.93 MB
+SSTable bytes written: 631.00 MB
+Write amplification: 5.05
+
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/memory.csv

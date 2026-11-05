@@ -67,7 +67,7 @@ Tick items off as they land; each one should arrive with its tests.
 
 - [x] `strata_bench` with StrataDB and LevelDB adapters and all workloads
 - [x] YCSB A/B/C with Zipfian keys
-- [ ] Run on an EC2 instance with local NVMe; record hardware and flags
+- [x] Run on an EC2 instance with local NVMe; record hardware and flags
 - [ ] Profile with `perf` and flame graphs, fix the top hotspot, re-measure
 - [ ] Charts for the five experiments
 - [ ] DESIGN.md: formats, compaction rules, durability table, trade-offs you chose
