@@ -21,7 +21,7 @@
 
 ## Results: StrataDB vs LevelDB
 
-16-byte keys, 100-byte values.
+16-byte keys, 100-byte values. Note that standard YCSB records are 1 KB; here YCSB workloads (`ycsba`, `ycsbb`, `ycsbc`) use 16-byte keys and 100-byte values so their rows line up directly with the other workloads.
 
 | Workload | Entries | StrataDB ops/s | LevelDB ops/s | StrataDB p99 | LevelDB p99 |
 |----------|---------|----------------|---------------|--------------|-------------|

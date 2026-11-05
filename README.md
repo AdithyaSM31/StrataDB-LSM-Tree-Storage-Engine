@@ -97,7 +97,7 @@ Print each engine's stats, including write amplification, after a fill. Stats ar
 ./build/bench/strata_bench --num=1000000 --benchmarks=fillrandom --stats
 ```
 
-`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). Run `strata_bench --help` for every option.
+`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). YCSB workloads can be tuned with `--ycsb_ops=N` (defaults to `--num`) and `--zipf_theta=F` (skew parameter in `(0, 1)`, default `0.99`). Run `strata_bench --help` for every option.
 
 ### Supported Workloads
 
@@ -108,6 +108,10 @@ Print each engine's stats, including write amplification, after a fill. Stats ar
   - `readseq`: walks the whole key space with an iterator.
   - `seekrandom`: one seek per operation.
   - `scan`: a seek plus 100 entries per operation.
+- **YCSB (Zipfian skew)**:
+  - `ycsbc`: 100% reads (read-only).
+  - `ycsbb`: 95% reads, 5% updates.
+  - `ycsba`: 50% reads, 50% updates.
 - **Mixed**: `readwhilewriting`: reader threads alongside one writer held to `--write_rate` (default 10,000 writes/s, 0 for no limit). The rate the writer reached is reported with the row.
 
 ### Datasets

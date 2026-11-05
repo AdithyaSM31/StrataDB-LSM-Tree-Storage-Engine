@@ -28,6 +28,7 @@
 #include "bench/adapter.h"
 #include "strata/status.h"
 #include "util/histogram.h"
+#include "util/zipfian.h"
 
 #ifndef STRATA_BENCH_COMMIT
 #define STRATA_BENCH_COMMIT "unknown"
@@ -65,7 +66,8 @@ constexpr int kDatasetFormatVersion = 2;
 constexpr std::string_view kCsvHeader =
     "run_id,commit,engine,workload,threads,num_ops,total_sec,ops_per_sec,mb_per_sec,p50_us,p99_us,"
     "p999_us,avg_us,min_us,max_us,entries,value_size,write_buffer_size,block_size,block_cache_size,"
-    "bloom_bits,max_open_files,dataset,levels_at_start,writer_ops,writer_ops_per_sec";
+    "bloom_bits,max_open_files,dataset,levels_at_start,writer_ops,writer_ops_per_sec,"
+    "zipf_theta,read_p50_us,read_p99_us,read_p999_us,update_p50_us,update_p99_us,update_p999_us";
 
 struct BenchConfig {
   std::string engine = "both";
@@ -81,6 +83,8 @@ struct BenchConfig {
   int max_open_files = 1000;
   size_t value_size = 100;
   uint64_t write_rate = 10000;  // readwhilewriting writes per second; 0 means unthrottled
+  size_t ycsb_ops = 0;          // 0 means: use num (overridden per-run if set)
+  double zipf_theta = 0.99;     // Zipfian skew parameter; must be in (0, 1)
   bool stats = false;
   std::string csv_path = "bench/results/benchmarks.csv";
   std::string run_id;
@@ -105,12 +109,23 @@ struct BenchmarkResult {
   std::string levels_at_start = "-";
   uint64_t writer_ops = 0;
   double writer_ops_per_sec = 0.0;
+  // YCSB workloads only: per-category percentiles.
+  double zipf_theta = -1.0;  // negative means "not a YCSB workload"
+  uint64_t read_ops = 0;
+  uint64_t update_ops = 0;
+  double read_p50_us = 0.0;
+  double read_p99_us = 0.0;
+  double read_p999_us = 0.0;
+  double update_p50_us = 0.0;
+  double update_p99_us = 0.0;
+  double update_p999_us = 0.0;
 };
 
 // One per thread, each on its own cache lines: latency recording writes to these
 // fields on every operation, and threads must not slow each other down doing it.
 struct alignas(kCacheLineSize) WorkerStats {
-  Histogram latency;
+  Histogram latency;       // general operations / YCSB updates
+  Histogram read_latency;  // YCSB reads
   uint64_t errors = 0;
   uint64_t bytes = 0;
 };
@@ -211,11 +226,16 @@ double RunWorkers(std::vector<WorkerStats>* stats, Body body) {
 }
 
 template <typename Op>
-void TimeOp(WorkerStats* worker, Op op) {
+void TimeOp(Histogram* hist, Op op) {
   const auto t0 = std::chrono::steady_clock::now();
   op();
   const auto t1 = std::chrono::steady_clock::now();
-  worker->latency.Add(std::chrono::duration<double, std::micro>(t1 - t0).count());
+  hist->Add(std::chrono::duration<double, std::micro>(t1 - t0).count());
+}
+
+template <typename Op>
+void TimeOp(WorkerStats* worker, Op op) {
+  TimeOp(&worker->latency, std::move(op));
 }
 
 bool NeedsCompaction(const std::vector<LevelShape>& shapes) {
@@ -270,6 +290,9 @@ void PrintConfig(const BenchConfig& cfg) {
   std::cout << "Compression:     none on both engines\n"
             << "Checksums:       every block read verified on both engines\n"
             << "LevelDB Build:   " << STRATA_BENCH_LEVELDB_FEATURES << "\n"
+            << "YCSB Ops:        " << (cfg.ycsb_ops > 0 ? cfg.ycsb_ops : cfg.num)
+            << " (per workload)\n"
+            << "Zipf Theta:      " << cfg.zipf_theta << "\n"
             << "DB Directory:    " << cfg.db_dir << "\n"
             << "CSV Output:      " << cfg.csv_path << "\n"
             << "================================================================================\n"
@@ -295,6 +318,19 @@ void PrintTableRow(const BenchmarkResult& r) {
   if (r.workload == "readwhilewriting") {
     std::printf("%-10s   writer: %" PRIu64 " writes at %.0f/s\n", "", r.writer_ops,
                 r.writer_ops_per_sec);
+  }
+  if (r.zipf_theta >= 0.0) {
+    // YCSB workload: show read and update latencies separately.
+    if (r.update_ops > 0) {
+      std::printf("%-10s   reads: %" PRIu64
+                  " ops, p50=%.2f p99=%.2f p999=%.2f us | updates: %" PRIu64
+                  " ops, p50=%.2f p99=%.2f p999=%.2f us\n",
+                  "", r.read_ops, r.read_p50_us, r.read_p99_us, r.read_p999_us, r.update_ops,
+                  r.update_p50_us, r.update_p99_us, r.update_p999_us);
+    } else {
+      std::printf("%-10s   reads: %" PRIu64 " ops, p50=%.2f p99=%.2f p999=%.2f us\n", "",
+                  r.read_ops, r.read_p50_us, r.read_p99_us, r.read_p999_us);
+    }
   }
   std::fflush(stdout);
 }
@@ -335,7 +371,7 @@ bool AppendCsv(const BenchConfig& cfg, const BenchmarkResult& r) {
   std::ostringstream row;
   row << cfg.run_id << ',' << STRATA_BENCH_COMMIT << ',' << r.engine << ',' << r.workload << ','
       << r.threads << ',' << r.num_ops << ',';
-  char numbers[256];
+  char numbers[512];
   std::snprintf(numbers, sizeof(numbers), "%.4f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,",
                 r.elapsed_seconds, r.ops_per_sec, r.mb_per_sec, r.p50_us, r.p99_us, r.p999_us,
                 r.avg_us, r.min_us, r.max_us);
@@ -344,7 +380,17 @@ bool AppendCsv(const BenchConfig& cfg, const BenchmarkResult& r) {
       << cfg.max_open_files << ',' << r.dataset << ',' << r.levels_at_start << ',' << r.writer_ops
       << ',';
   std::snprintf(numbers, sizeof(numbers), "%.1f", r.writer_ops_per_sec);
-  row << numbers << '\n';
+  row << numbers << ',';
+  // YCSB-specific columns: empty for non-YCSB workloads.
+  if (r.zipf_theta >= 0.0) {
+    std::snprintf(numbers, sizeof(numbers), "%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f", r.zipf_theta,
+                  r.read_p50_us, r.read_p99_us, r.read_p999_us, r.update_p50_us, r.update_p99_us,
+                  r.update_p999_us);
+    row << numbers;
+  } else {
+    row << ",,,,,,";
+  }
+  row << '\n';
 
   std::ofstream csv(cfg.csv_path, std::ios::app);
   csv << row.str();
@@ -398,7 +444,8 @@ class BenchmarkRunner {
  private:
   static bool IsWriteWorkload(const std::string& workload) {
     return workload == "fillseq" || workload == "fillrandom" || workload == "overwrite" ||
-           workload == "fillsync" || workload == "readwhilewriting";
+           workload == "fillsync" || workload == "readwhilewriting" || workload == "ycsba" ||
+           workload == "ycsbb";
   }
 
   // Counters live for one open of the database, and compactions the workload caused
@@ -602,6 +649,24 @@ class BenchmarkRunner {
         return std::nullopt;
       }
       r = RunReadWhileWriting();
+    } else if (workload == "ycsbc") {
+      r = RunYcsb(workload, /*read_frac=*/1.0);
+    } else if (workload == "ycsbb") {
+      if (!InvalidateDataset()) {
+        return std::nullopt;
+      }
+      r = RunYcsb(workload, /*read_frac=*/0.95);
+      if (r.errors == 0 && !WriteDatasetMarker(start.dataset + "+ycsbb")) {
+        return std::nullopt;
+      }
+    } else if (workload == "ycsba") {
+      if (!InvalidateDataset()) {
+        return std::nullopt;
+      }
+      r = RunYcsb(workload, /*read_frac=*/0.50);
+      if (r.errors == 0 && !WriteDatasetMarker(start.dataset + "+ycsba")) {
+        return std::nullopt;
+      }
     }
     r.dataset = start.dataset;
     r.levels_at_start = start.levels_at_start;
@@ -863,6 +928,117 @@ class BenchmarkRunner {
     return r;
   }
 
+  // Runs a YCSB-style workload.  read_frac is the fraction of operations that
+  // are Gets (1.0 for C, 0.95 for B, 0.50 for A); the rest are blind Puts.
+  // Keys are drawn from a Zipfian distribution over [0, num).
+  // Reads are recorded in read_latency; updates in latency.
+  BenchmarkResult RunYcsb(const std::string& workload, double read_frac) {
+    const size_t n = cfg_.num;
+    const size_t ops = cfg_.ycsb_ops > 0 ? cfg_.ycsb_ops : n;
+    const double theta = cfg_.zipf_theta;
+
+    // Compute zeta(n) once, outside the timed section. O(n).
+    const double zeta_n = ZipfZeta(static_cast<uint64_t>(n), theta);
+
+    // Seed offsets chosen to differ from all other workloads.
+    constexpr uint64_t kYcsbDecisionOffset = 10000;
+    constexpr uint64_t kYcsbZipfOffset = 11000;
+    uint64_t workload_offset = 0;
+    if (workload == "ycsbb") {
+      workload_offset = 100;
+    } else if (workload == "ycsba") {
+      workload_offset = 200;
+    }
+
+    std::vector<WorkerStats> stats(static_cast<size_t>(cfg_.threads));
+    const double elapsed = RunWorkers(&stats, [&](int t, WorkerStats* w) {
+      const size_t total_threads = static_cast<size_t>(cfg_.threads);
+      const size_t thread_ops =
+          ops / total_threads + (static_cast<size_t>(t) < ops % total_threads ? 1 : 0);
+
+      // Per-thread Zipfian generator seeded uniquely.
+      ZipfianGenerator zipf(
+          static_cast<uint64_t>(n), theta, zeta_n,
+          kDefaultSeed + kYcsbZipfOffset + workload_offset + static_cast<uint64_t>(t));
+      // Per-thread PRNG for the read/update decision.
+      std::mt19937_64 decision_rng(kDefaultSeed + kYcsbDecisionOffset + workload_offset +
+                                   static_cast<uint64_t>(t));
+      std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+
+      std::string value;
+      for (size_t i = 0; i < thread_ops; ++i) {
+        // Choose key, operation, and value before measuring time.
+        const uint64_t key_id = zipf.Next();
+        const std::string key = FormatKey(key_id);
+        const bool is_read = (unit_dist(decision_rng) < read_frac);
+
+        if (is_read) {
+          Status s;
+          TimeOp(&w->read_latency, [&]() { s = adapter_->Get(key, &value); });
+          if (!s.ok()) {
+            CountError(w, "get", key, s.ToString());
+          } else if (value.size() != cfg_.value_size) {
+            CountError(w, "get", key, "value has " + std::to_string(value.size()) + " bytes");
+          } else {
+            w->bytes += key.size() + value.size();
+          }
+        } else {
+          constexpr uint64_t kYcsbUpdateValueSalt = 10000;
+          const std::string_view val =
+              val_gen_.Generate(key_id + kYcsbUpdateValueSalt, cfg_.value_size);
+          Status s;
+          TimeOp(&w->latency, [&]() { s = adapter_->Put(key, val); });
+          if (s.ok()) {
+            w->bytes += key.size() + val.size();
+          } else {
+            CountError(w, "put", key, s.ToString());
+          }
+        }
+      }
+    });
+
+    // Merge per-thread histograms.
+    Histogram read_hist;
+    Histogram update_hist;
+    Histogram combined;
+    uint64_t bytes = 0;
+    uint64_t errors = 0;
+    for (const WorkerStats& ws : stats) {
+      read_hist.Merge(ws.read_latency);
+      update_hist.Merge(ws.latency);
+      combined.Merge(ws.read_latency);
+      combined.Merge(ws.latency);
+      bytes += ws.bytes;
+      errors += ws.errors;
+    }
+
+    BenchmarkResult r;
+    r.engine = engine_name_;
+    r.workload = workload;
+    r.threads = cfg_.threads;
+    r.num_ops = ops;
+    r.errors = errors;
+    r.elapsed_seconds = elapsed;
+    r.ops_per_sec = (elapsed > 0.0) ? (static_cast<double>(ops) / elapsed) : 0.0;
+    r.mb_per_sec = (elapsed > 0.0) ? (static_cast<double>(bytes) / (elapsed * 1048576.0)) : 0.0;
+    r.p50_us = combined.Percentile(50.0);
+    r.p99_us = combined.Percentile(99.0);
+    r.p999_us = combined.Percentile(99.9);
+    r.avg_us = combined.Average();
+    r.min_us = combined.Min();
+    r.max_us = combined.Max();
+    r.zipf_theta = theta;
+    r.read_ops = static_cast<uint64_t>(read_hist.num());
+    r.update_ops = static_cast<uint64_t>(update_hist.num());
+    r.read_p50_us = read_hist.Percentile(50.0);
+    r.read_p99_us = read_hist.Percentile(99.0);
+    r.read_p999_us = read_hist.Percentile(99.9);
+    r.update_p50_us = update_hist.Percentile(50.0);
+    r.update_p99_us = update_hist.Percentile(99.0);
+    r.update_p999_us = update_hist.Percentile(99.9);
+    return r;
+  }
+
   BenchmarkResult BuildResult(const std::string& workload, uint64_t ops, double elapsed,
                               const std::vector<WorkerStats>& stats) const {
     Histogram merged;
@@ -981,9 +1157,11 @@ void PrintUsage() {
       << "  --stats                          Print engine stats after each write workload\n"
       << "  --csv=PATH                       CSV file to append to "
          "(default: bench/results/benchmarks.csv)\n"
+      << "  --ycsb_ops=N                     Operations for YCSB workloads (default: num)\n"
+      << "  --zipf_theta=F                   Zipfian skew in (0,1); 0.99 is YCSB default\n"
       << "\n"
       << "Workloads: fillseq fillrandom overwrite fillsync readseq readrandom readmissing\n"
-      << "           seekrandom scan readwhilewriting\n"
+      << "           seekrandom scan ycsbc ycsbb ycsba readwhilewriting\n"
       << "\n"
       << "Exit status: 0 on success, 1 if any operation or workload failed, 2 for bad usage.\n";
 }
@@ -1048,6 +1226,26 @@ std::optional<int> ParseArgs(int argc, char* argv[], BenchConfig* cfg) {
       ok = parse_number(value, kBytes, 1, kMaxValueSize, &cfg->value_size);
     } else if (value_of("--write_rate=", &value)) {
       ok = parse_number(value, kCount, 0, kNoLimit, &cfg->write_rate);
+    } else if (value_of("--ycsb_ops=", &value)) {
+      ok = parse_number(value, kCount, 1, kMaxEntries, &cfg->ycsb_ops);
+    } else if (value_of("--zipf_theta=", &value)) {
+      double parsed_theta = 0.0;
+      size_t pos = 0;
+      const std::string val_str(value);
+      try {
+        parsed_theta = std::stod(val_str, &pos);
+        if (pos != val_str.size()) {
+          ok = false;
+        }
+      } catch (...) {
+        ok = false;
+      }
+      if (!ok || parsed_theta <= 0.0 || parsed_theta >= 1.0) {
+        std::cerr << "Invalid value: " << arg << " (zipf_theta must be in (0, 1))\n";
+        ok = false;
+      } else {
+        cfg->zipf_theta = parsed_theta;
+      }
     } else if (value_of("--csv=", &value)) {
       cfg->csv_path = value;
     } else if (arg == "--stats" || arg == "--stats=1" || arg == "--stats=true") {
@@ -1074,8 +1272,8 @@ int RunMain(int argc, char* argv[]) {
   cfg.run_id = MakeRunId();
 
   const std::vector<std::string> known_workloads = {
-      "fillseq",    "readseq", "fillrandom", "readrandom",       "readmissing",
-      "seekrandom", "scan",    "overwrite",  "readwhilewriting", "fillsync"};
+      "fillseq", "readseq", "fillrandom", "readrandom", "readmissing",      "seekrandom", "scan",
+      "ycsbc",   "ycsbb",   "ycsba",      "overwrite",  "readwhilewriting", "fillsync"};
   const std::vector<std::string> workloads =
       cfg.benchmarks == "all" ? known_workloads : Split(cfg.benchmarks, ',');
   if (workloads.empty()) {
