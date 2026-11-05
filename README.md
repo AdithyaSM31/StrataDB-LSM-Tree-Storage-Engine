@@ -132,7 +132,7 @@ Every read is checked: keys must be found with the right value size, missing key
 - **Key sequences**: the same seeds give both engines the same keys in the same order.
 - **Latency recording**: each thread has its own `Histogram` on its own cache lines; they are merged after the run.
 
-Each run prints its options, the commit and LevelDB's optional dependencies. Results are appended to `bench/results/benchmarks.csv` with a run ID and the options, so repeat runs can be told apart.
+Each run prints its options, the commit and LevelDB's optional dependencies. Results are appended to `bench/results/benchmarks.csv` with a run ID and the options, so repeat runs can be told apart. YCSB rows also record the skew, the read and update counts, and each side's latency percentiles.
 
 ## Durability
 

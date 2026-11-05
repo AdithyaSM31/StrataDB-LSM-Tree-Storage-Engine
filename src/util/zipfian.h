@@ -5,6 +5,10 @@
 // [0, n) drawn from the Zipf distribution. Scrambling uses FNV-1a 64-bit so
 // that the hottest keys do not all sit next to each other at the low end of
 // the key space.
+//
+// Ranks 0 and 1 are exact. Above them Gray's closed form is an approximation:
+// rank 2 comes out up to 20% too hot, the excess fades by about rank 10, and
+// the tail is up to 2% light.
 
 #ifndef STRATA_UTIL_ZIPFIAN_H_
 #define STRATA_UTIL_ZIPFIAN_H_
@@ -18,13 +22,16 @@
 
 namespace strata {
 
+// Written so that NaN, which fails every comparison, is invalid.
+inline bool IsValidZipfTheta(double theta) { return theta > 0.0 && theta < 1.0; }
+
 // Compute zeta(n, theta) = sum_{i=1}^{n} 1/i^theta.
 // This is O(n) and should be called once before the timed section.
 inline double ZipfZeta(uint64_t n, double theta) {
   if (n == 0) {
     throw std::invalid_argument("ZipfZeta: n must be >= 1");
   }
-  if (theta <= 0.0 || theta >= 1.0) {
+  if (!IsValidZipfTheta(theta)) {
     throw std::invalid_argument("ZipfZeta: theta must be in (0, 1); got " + std::to_string(theta));
   }
   double z = 0.0;
@@ -57,14 +64,14 @@ class ZipfianGenerator {
   // seed   – seed for the internal PRNG
   ZipfianGenerator(uint64_t n, double theta, double zeta_n, uint64_t seed)
       : n_(n), theta_(theta), zeta_n_(zeta_n), rng_(seed) {
-    if (theta >= 1.0 || theta <= 0.0) {
+    if (!IsValidZipfTheta(theta)) {
       throw std::invalid_argument("ZipfianGenerator: theta must be in (0, 1); got " +
                                   std::to_string(theta));
     }
     if (n == 0) {
       throw std::invalid_argument("ZipfianGenerator: n must be >= 1");
     }
-    if (zeta_n <= 0.0) {
+    if (!(zeta_n > 0.0)) {
       throw std::invalid_argument("ZipfianGenerator: zeta_n must be > 0");
     }
 

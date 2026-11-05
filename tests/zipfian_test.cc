@@ -2,10 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <random>
-#include <unordered_set>
+#include <limits>
+#include <stdexcept>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace strata {
@@ -49,8 +52,12 @@ TEST(ZipfianTest, ResultsInRangeN2) {
   for (int i = 0; i < 10000; ++i) {
     const uint64_t r = gen.NextRank();
     ASSERT_LT(r, 2u);
-    if (r == 0) saw_zero = true;
-    if (r == 1) saw_one = true;
+    if (r == 0) {
+      saw_zero = true;
+    }
+    if (r == 1) {
+      saw_one = true;
+    }
 
     const uint64_t v = gen.Next();
     ASSERT_LT(v, 2u);
@@ -131,8 +138,12 @@ TEST(ZipfianTest, Rank1ToRank0FrequencyRatio) {
   int hits1 = 0;
   for (int i = 0; i < kTrials; ++i) {
     const uint64_t r = gen.NextRank();
-    if (r == 0) ++hits0;
-    if (r == 1) ++hits1;
+    if (r == 0) {
+      ++hits0;
+    }
+    if (r == 1) {
+      ++hits1;
+    }
   }
 
   ASSERT_GT(hits0, 0);
@@ -140,6 +151,78 @@ TEST(ZipfianTest, Rank1ToRank0FrequencyRatio) {
   const double expected = std::pow(0.5, kTheta);
   EXPECT_NEAR(ratio, expected, 0.05 * expected)
       << "rank1/rank0 ratio " << ratio << " vs expected " << expected;
+}
+
+TEST(ZipfianTest, RanksAboveOneFollowGraysFormula) {
+  // Gray's form is not exact Zipf at these ranks, so exact Zipf is the wrong yardstick.
+  // Inverting it gives P(rank < r) for r >= 2. eta is worked out here rather than read
+  // from the generator, so that a wrong eta shows up.
+  constexpr uint64_t kN = 1000000;
+  constexpr int kTrials = 5000000;
+  constexpr double kTheta = 0.99;
+  constexpr uint64_t kLastRank = 9;
+
+  const double zeta = ZipfZeta(kN, kTheta);
+  const double zeta2 = 1.0 + std::pow(0.5, kTheta);
+  const double numerator = 1.0 - std::pow(2.0 / static_cast<double>(kN), 1.0 - kTheta);
+  const double eta = numerator / (1.0 - zeta2 / zeta);
+  const auto below = [&](uint64_t rank) {
+    const double share = static_cast<double>(rank) / static_cast<double>(kN);
+    return (std::pow(share, 1.0 - kTheta) - 1.0 + eta) / eta;
+  };
+
+  ZipfianGenerator gen(kN, kTheta, zeta, 11);
+  std::vector<int> hits(kLastRank + 1, 0);
+  for (int i = 0; i < kTrials; ++i) {
+    const uint64_t r = gen.NextRank();
+    if (r <= kLastRank) {
+      ++hits[r];
+    }
+  }
+
+  for (uint64_t rank = 2; rank <= kLastRank; ++rank) {
+    const double expected = below(rank + 1) - below(rank);
+    const double actual = static_cast<double>(hits[rank]) / kTrials;
+    EXPECT_NEAR(actual, expected, 0.03 * expected) << "rank " << rank;
+  }
+}
+
+TEST(ZipfianTest, TailMatchesExactZipf) {
+  // Ranks from 10 up are close to exact Zipf, which makes this independent of the
+  // generator's own formula. Each decade should get its share of the draws.
+  constexpr uint64_t kN = 1000000;
+  constexpr int kTrials = 3000000;
+
+  for (double theta : {0.5, 0.8, 0.99}) {
+    const double zeta = ZipfZeta(kN, theta);
+    std::vector<std::pair<uint64_t, uint64_t>> decades;
+    for (uint64_t low = 10; low < kN; low *= 10) {
+      decades.emplace_back(low, low * 10);
+    }
+
+    ZipfianGenerator gen(kN, theta, zeta, 13);
+    std::vector<int> hits(decades.size(), 0);
+    for (int i = 0; i < kTrials; ++i) {
+      const uint64_t r = gen.NextRank();
+      for (size_t d = 0; d < decades.size(); ++d) {
+        if (r >= decades[d].first && r < decades[d].second) {
+          ++hits[d];
+          break;
+        }
+      }
+    }
+
+    for (size_t d = 0; d < decades.size(); ++d) {
+      double expected = 0.0;
+      for (uint64_t rank = decades[d].first; rank < decades[d].second; ++rank) {
+        expected += std::pow(static_cast<double>(rank + 1), -theta);
+      }
+      expected /= zeta;
+      const double actual = static_cast<double>(hits[d]) / kTrials;
+      EXPECT_NEAR(actual, expected, 0.03 * expected)
+          << "theta " << theta << ", ranks from " << decades[d].first;
+    }
+  }
 }
 
 // ── scrambling ────────────────────────────────────────────────────────────────
@@ -154,33 +237,53 @@ TEST(ZipfianTest, ScramblingKeysInRange) {
   }
 }
 
-TEST(ZipfianTest, HottestKeysAreNotNeighbours) {
-  // Scrambling maps raw rank -> Fnv1a64(rank) % n. The hottest ranks
-  // (0, 1, 2, ...) must NOT map to adjacent keys (|a - b| <= 1).
-  constexpr int kCheckRanks = 10;
-  constexpr uint64_t kN = 100000;
+TEST(ZipfianTest, NextIsTheHashOfTheRank) {
+  constexpr uint64_t kN = 50000;
+  const double zeta = ZipfZeta(kN, 0.99);
+  ZipfianGenerator ranks(kN, 0.99, zeta, 21);
+  ZipfianGenerator keys(kN, 0.99, zeta, 21);
 
-  std::vector<uint64_t> hot_keys;
-  hot_keys.reserve(kCheckRanks);
-  for (int rank = 0; rank < kCheckRanks; ++rank) {
-    hot_keys.push_back(Fnv1a64(static_cast<uint64_t>(rank)) % kN);
+  for (int i = 0; i < 10000; ++i) {
+    ASSERT_EQ(keys.Next(), Fnv1a64(ranks.NextRank()) % kN) << "at trial " << i;
+  }
+}
+
+TEST(ZipfianTest, HottestKeysAreNotNeighbours) {
+  // Finds the hot keys from what Next() actually returns: the ten most drawn
+  // must not sit next to each other in the key space.
+  constexpr size_t kCheckKeys = 10;
+  constexpr uint64_t kN = 100000;
+  constexpr int kTrials = 500000;
+
+  auto gen = MakeGen(kN);
+  std::unordered_map<uint64_t, int> counts;
+  for (int i = 0; i < kTrials; ++i) {
+    ++counts[gen.Next()];
   }
 
-  int adjacent = 0;
-  for (int i = 0; i < kCheckRanks; ++i) {
-    for (int j = i + 1; j < kCheckRanks; ++j) {
-      const uint64_t diff =
-          hot_keys[i] > hot_keys[j] ? hot_keys[i] - hot_keys[j] : hot_keys[j] - hot_keys[i];
-      if (diff <= 1) ++adjacent;
+  std::vector<std::pair<int, uint64_t>> by_count;
+  by_count.reserve(counts.size());
+  for (const auto& [key, count] : counts) {
+    by_count.emplace_back(count, key);
+  }
+  ASSERT_GE(by_count.size(), kCheckKeys);
+  std::partial_sort(by_count.begin(), by_count.begin() + kCheckKeys, by_count.end(),
+                    [](const auto& a, const auto& b) { return a.first > b.first; });
+
+  for (size_t i = 0; i < kCheckKeys; ++i) {
+    for (size_t j = i + 1; j < kCheckKeys; ++j) {
+      const uint64_t a = by_count[i].second;
+      const uint64_t b = by_count[j].second;
+      EXPECT_GT(a > b ? a - b : b - a, 1u) << "hot keys " << a << " and " << b << " are adjacent";
     }
   }
-  EXPECT_EQ(adjacent, 0) << "found adjacent hot keys after scrambling";
+}
 
-  // Also verify that rank 0 and rank 1 map to non-adjacent keys.
-  const uint64_t key0 = Fnv1a64(0) % kN;
-  const uint64_t key1 = Fnv1a64(1) % kN;
-  const uint64_t key_diff = key0 > key1 ? key0 - key1 : key1 - key0;
-  EXPECT_GT(key_diff, 1u);
+TEST(ZipfianTest, Fnv1a64KnownValues) {
+  // Worked out separately, by hashing each value's 8 little-endian bytes.
+  EXPECT_EQ(Fnv1a64(0), UINT64_C(12161962213042174405));
+  EXPECT_EQ(Fnv1a64(1), UINT64_C(9929646806074584996));
+  EXPECT_EQ(Fnv1a64(UINT64_C(0x0102030405060708)), UINT64_C(895447315735140821));
 }
 
 // ── invalid inputs ────────────────────────────────────────────────────────────
@@ -205,6 +308,13 @@ TEST(ZipfianTest, InvalidThetaNegative) {
   EXPECT_THROW(ZipfZeta(1000, -0.5), std::invalid_argument);
 }
 
+TEST(ZipfianTest, InvalidThetaNaN) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW({ ZipfianGenerator gen(1000, nan, 1.0, 42); }, std::invalid_argument);
+  EXPECT_THROW(ZipfZeta(1000, nan), std::invalid_argument);
+  EXPECT_FALSE(IsValidZipfTheta(nan));
+}
+
 TEST(ZipfianTest, InvalidNZero) {
   EXPECT_THROW({ ZipfianGenerator gen(0, 0.99, 1.0, 42); }, std::invalid_argument);
   EXPECT_THROW(ZipfZeta(0, 0.99), std::invalid_argument);
@@ -213,48 +323,8 @@ TEST(ZipfianTest, InvalidNZero) {
 TEST(ZipfianTest, InvalidZetaZeroOrNegative) {
   EXPECT_THROW({ ZipfianGenerator gen(1000, 0.99, 0.0, 42); }, std::invalid_argument);
   EXPECT_THROW({ ZipfianGenerator gen(1000, 0.99, -5.0, 42); }, std::invalid_argument);
-}
-
-// ── read/update split ratio test ──────────────────────────────────────────────
-
-TEST(ZipfianTest, ReadUpdateSplitWithinOnePercent) {
-  constexpr int kOps = 200000;
-
-  // Test 95% reads (YCSB B)
-  {
-    std::mt19937_64 rng(133742);
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
-    int reads = 0;
-    int updates = 0;
-    for (int i = 0; i < kOps; ++i) {
-      if (dist(rng) < 0.95) {
-        ++reads;
-      } else {
-        ++updates;
-      }
-    }
-    const double read_pct = static_cast<double>(reads) / kOps;
-    EXPECT_NEAR(read_pct, 0.95, 0.01) << "95% read ratio out of 1% tolerance: " << read_pct;
-    EXPECT_EQ(reads + updates, kOps);
-  }
-
-  // Test 50% reads (YCSB A)
-  {
-    std::mt19937_64 rng(133743);
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
-    int reads = 0;
-    int updates = 0;
-    for (int i = 0; i < kOps; ++i) {
-      if (dist(rng) < 0.50) {
-        ++reads;
-      } else {
-        ++updates;
-      }
-    }
-    const double read_pct = static_cast<double>(reads) / kOps;
-    EXPECT_NEAR(read_pct, 0.50, 0.01) << "50% read ratio out of 1% tolerance: " << read_pct;
-    EXPECT_EQ(reads + updates, kOps);
-  }
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW({ ZipfianGenerator gen(1000, 0.99, nan, 42); }, std::invalid_argument);
 }
 
 }  // namespace strata

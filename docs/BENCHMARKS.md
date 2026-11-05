@@ -23,6 +23,8 @@
 
 16-byte keys, 100-byte values. Note that standard YCSB records are 1 KB; here YCSB workloads (`ycsba`, `ycsbb`, `ycsbc`) use 16-byte keys and 100-byte values so their rows line up directly with the other workloads.
 
+YCSB keys come from Gray's closed form at theta 0.99, which runs up to 20% hot at rank 2 and up to 2% light in the tail compared with exact Zipf. Ranks are then scrambled with `fnv1a(rank) % n`, which isn't a permutation: at 1M keys only 46% of keys can ever be drawn, where a random hash would reach 63%. The hottest 10,000 ranks don't collide, so the hot set is unaffected.
+
 | Workload | Entries | StrataDB ops/s | LevelDB ops/s | StrataDB p99 | LevelDB p99 |
 |----------|---------|----------------|---------------|--------------|-------------|
 

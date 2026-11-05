@@ -67,7 +67,8 @@ constexpr std::string_view kCsvHeader =
     "run_id,commit,engine,workload,threads,num_ops,total_sec,ops_per_sec,mb_per_sec,p50_us,p99_us,"
     "p999_us,avg_us,min_us,max_us,entries,value_size,write_buffer_size,block_size,block_cache_size,"
     "bloom_bits,max_open_files,dataset,levels_at_start,writer_ops,writer_ops_per_sec,"
-    "zipf_theta,read_p50_us,read_p99_us,read_p999_us,update_p50_us,update_p99_us,update_p999_us";
+    "zipf_theta,read_ops,update_ops,read_p50_us,read_p99_us,read_p999_us,update_p50_us,"
+    "update_p99_us,update_p999_us";
 
 struct BenchConfig {
   std::string engine = "both";
@@ -367,11 +368,22 @@ bool PrepareCsv(const std::string& csv_path) {
   return true;
 }
 
+// One side of a YCSB mix. With no operations there is no latency, and 0.00 would
+// read as a very fast one, so the columns stay blank.
+std::string LatencyColumns(uint64_t ops, double p50, double p99, double p999) {
+  if (ops == 0) {
+    return ",,";
+  }
+  char columns[96];
+  std::snprintf(columns, sizeof(columns), "%.2f,%.2f,%.2f", p50, p99, p999);
+  return columns;
+}
+
 bool AppendCsv(const BenchConfig& cfg, const BenchmarkResult& r) {
   std::ostringstream row;
   row << cfg.run_id << ',' << STRATA_BENCH_COMMIT << ',' << r.engine << ',' << r.workload << ','
       << r.threads << ',' << r.num_ops << ',';
-  char numbers[512];
+  char numbers[256];
   std::snprintf(numbers, sizeof(numbers), "%.4f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,",
                 r.elapsed_seconds, r.ops_per_sec, r.mb_per_sec, r.p50_us, r.p99_us, r.p999_us,
                 r.avg_us, r.min_us, r.max_us);
@@ -383,12 +395,12 @@ bool AppendCsv(const BenchConfig& cfg, const BenchmarkResult& r) {
   row << numbers << ',';
   // YCSB-specific columns: empty for non-YCSB workloads.
   if (r.zipf_theta >= 0.0) {
-    std::snprintf(numbers, sizeof(numbers), "%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f", r.zipf_theta,
-                  r.read_p50_us, r.read_p99_us, r.read_p999_us, r.update_p50_us, r.update_p99_us,
-                  r.update_p999_us);
-    row << numbers;
+    std::snprintf(numbers, sizeof(numbers), "%.4f", r.zipf_theta);
+    row << numbers << ',' << r.read_ops << ',' << r.update_ops << ','
+        << LatencyColumns(r.read_ops, r.read_p50_us, r.read_p99_us, r.read_p999_us) << ','
+        << LatencyColumns(r.update_ops, r.update_p50_us, r.update_p99_us, r.update_p999_us);
   } else {
-    row << ",,,,,,";
+    row << ",,,,,,,,";
   }
   row << '\n';
 
@@ -1240,7 +1252,7 @@ std::optional<int> ParseArgs(int argc, char* argv[], BenchConfig* cfg) {
       } catch (...) {
         ok = false;
       }
-      if (!ok || parsed_theta <= 0.0 || parsed_theta >= 1.0) {
+      if (!ok || !IsValidZipfTheta(parsed_theta)) {
         std::cerr << "Invalid value: " << arg << " (zipf_theta must be in (0, 1))\n";
         ok = false;
       } else {
