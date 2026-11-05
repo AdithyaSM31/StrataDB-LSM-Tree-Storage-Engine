@@ -1,8 +1,8 @@
-Running scope as unit: run-r2670b6b8ed02401d95df021dacc1d420.scope
+Running scope as unit: run-r20c5b25395bd40099bbf14e3c2dfd00e.scope
 ================================================================================
 StrataDB Benchmark Harness
 ================================================================================
-Run ID:          20261105T130404Z
+Run ID:          20261105T150327Z
 Commit:          96c8e3c6d3b3
 Engines:         leveldb
 Benchmarks:      readmissing
@@ -22,13 +22,13 @@ LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
 YCSB Ops:        1000000 (per workload)
 Zipf Theta:      0.99
 DB Directory:    /home/adith/strata_bench_data
-CSV Output:      /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/disk.csv
+CSV Output:      docs/results/disk.csv
 ================================================================================
 
 --------------------------------------------------------------------------------------------------------------------------
 Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
 --------------------------------------------------------------------------------------------------------------------------
-LevelDB    readmissing             1     743512.8     11.35      0.55      2.72     138.89       0  fillrandom
+LevelDB    readmissing             1      38436.5      0.59      1.07    338.64     502.31       0  fillrandom
 --------------------------------------------------------------------------------------------------------------------------
 
-Results written to: /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/disk.csv
+Results written to: docs/results/disk.csv

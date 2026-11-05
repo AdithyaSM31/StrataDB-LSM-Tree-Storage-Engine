@@ -1,0 +1,35 @@
+Running scope as unit: run-raed054eed10c4b20ba55e4e861a41d58.scope
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261105T153935Z
+Commit:          96c8e3c6d3b3
+Engines:         leveldb
+Benchmarks:      ycsbc
+Entries:         1000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+YCSB Ops:        1000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /home/adith/strata_bench_data
+CSV Output:      docs/results/disk.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB    ycsbc                   1       9769.6      1.08      4.77    537.40     918.26       0  fillrandom
+             reads: 1000000 ops, p50=4.77 p99=537.40 p999=918.26 us
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: docs/results/disk.csv

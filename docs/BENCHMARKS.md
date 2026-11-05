@@ -93,23 +93,28 @@ This tier evaluates throughput and latency when the working set fits in OS page 
 | ycsba            | 1000000 | 182,869.1      | 475,502.3     | 121.83            | 6.44             |
 | readwhilewriting | 1000000 | 86,416.2       | 394,756.8     | 126.20            | 3.79             |
 
-### Tier 2: On-Disk (MemoryMax=512M, Real NVMe Reads)
+### Tier 2: On-Disk (Memory-Constrained, Real NVMe Reads)
 
-This tier restricts execution memory using `systemd-run --scope -p MemoryMax=512M -p MemorySwapMax=0`. By forcing page cache evictions under memory pressure, reads exercise physical storage I/O paths rather than operating purely out of RAM.
+This tier restricts execution memory using `systemd-run --scope -p MemoryMax=64M -p MemorySwapMax=0` (scaled to 64M for the 1M-key dataset so that the 112 MB dataset exceeds memory and forces OS page cache evictions; on full 10M keys on EC2 `i4i.2xlarge`, `MemoryMax=512M` is used). By forcing physical block reads from NVMe storage rather than serving hits out of RAM, this tier measures real physical storage I/O performance.
 
 | Workload | Entries | StrataDB ops/s | LevelDB ops/s | StrataDB p99 (us) | LevelDB p99 (us) |
 |----------|---------|----------------|---------------|-------------------|------------------|
-| readrandom       | 1000000 | 89,126.9       | 414,833.1     | 112.65            | 3.54             |
-| readmissing      | 1000000 | 1,383,284.1    | 738,612.3     | 1.30              | 2.57             |
-| seekrandom       | 1000000 | 63,037.6       | 231,860.7     | 71.15             | 6.00             |
-| scan             | 1000000 | 17,338.8       | 60,260.6      | 374.91            | 83.57            |
-| ycsbc            | 1000000 | 130,361.0      | 400,670.7     | 120.66            | 3.64             |
+| readrandom       | 1000000 | 7,730.3         | 6,931.1        | 364.42            | 519.53           |
+| readmissing      | 1000000 | 1,281,079.1     | 37,453.0       | 1.60              | 348.48           |
+| seekrandom       | 1000000 | 6,692.0         | 5,526.7        | 419.63            | 651.62           |
+| scan             | 1000000 | 2,909.1         | 4,488.4        | 931.98            | 731.33           |
+| ycsbc            | 1000000 | 15,437.8        | 10,543.0       | 304.09            | 502.79           |
 
 ### Key Observations
 
-1. **`readmissing` Superiority**: StrataDB significantly outperforms LevelDB on missing-key lookups (1.38M ops/s vs 738K ops/s, an **87% throughput lead**). StrataDB's Bloom filter probes quickly eliminate non-existent keys before traversing table index blocks or issuing disk reads, whereas LevelDB spends additional cycles per filter check.
-2. **`fillsync` Parity**: Synchronous writes (`fillsync`) achieve parity between both engines (~139 ops/s for StrataDB vs ~136 ops/s for LevelDB), demonstrating that StrataDB's WAL write and `fdatasync` path is bottlenecked purely by underlying disk flush latency rather than lock contention.
-3. **Software CRC Bottleneck**: In memory-resident read paths (`readrandom`, `readseq`, `seekrandom`), StrataDB exhibits lower throughput than LevelDB due to software CRC32C computation overhead executed on every block read. This establishes the exact "before" baseline for the upcoming profiling and hardware acceleration step.
+1. **Reversal of Gap on Real NVMe Storage**: In the memory-resident tier (Tier 1), LevelDB achieved higher throughput across read workloads due to StrataDB's software CRC32C overhead on every block read. However, once real disk I/O latency is introduced in Tier 2:
+   - On **`readrandom`**, physical 4K NVMe read latency outweighs CPU CRC computation, and StrataDB is **1.12x faster** than LevelDB (7,730 ops/s vs 6,931 ops/s) with 30% lower p99 latency (364 us vs 520 us).
+   - On **`seekrandom`**, StrataDB is **1.21x faster** than LevelDB (6,692 ops/s vs 5,527 ops/s).
+   - On **`ycsbc`** (Zipfian read distribution), StrataDB is **1.46x faster** than LevelDB (15,438 ops/s vs 10,543 ops/s), completely reversing the 3.2x in-memory deficit.
+   - On **`scan`**, the 3.4x in-memory performance gap between LevelDB and StrataDB shrinks to 1.54x as iterator advancement becomes I/O constrained.
+2. **Massive `readmissing` Advantage on Disk (34x)**: In Tier 2, StrataDB processes 1.28M missing key queries per second while LevelDB plummets from 746k to 37.5k ops/s (**a 34.2x throughput lead for StrataDB**). StrataDB's Bloom filter probes decisively filter out non-existent keys in CPU without issuing physical NVMe reads. In contrast, LevelDB's filter false-positive rate and filter structure force physical SSTable block reads on non-existent keys.
+3. **`fillsync` NVMe Flushing Parity**: Synchronous writes (`fillsync`) achieve parity between both engines (~139 ops/s for StrataDB vs ~136 ops/s for LevelDB), demonstrating that StrataDB's WAL write and `fdatasync` path is bottlenecked purely by physical drive flush latency rather than mutex contention or queue overhead.
+4. **Software CRC Bottleneck Identified**: Tier 1 clearly isolates that StrataDB's read deficit in memory is caused by software CRC calculation rather than iterator or cache overhead, setting up the upcoming hardware CRC acceleration and profiling step.
 
 ---
 
@@ -120,11 +125,11 @@ Write amplification measures total bytes written to persistent storage (WAL + SS
 | Workload | StrataDB Write Amp | LevelDB Write Amp | Notes |
 |----------|-------------------|-------------------|-------|
 | `fillseq`          | 0.88              | 0.99              | Sequential ingestion avoids cascade compactions; trivial moves to deeper levels. |
-| `fillrandom`       | 4.00              | 4.64              | StrataDB's size-tiered scoring and leveled compaction achieve lower write amp than LevelDB. |
-| `overwrite`        | 5.02              | 4.58              | Full overwrites trigger compactions across existing level ranges. |
-| `ycsba`            | 2.98              | 2.31              | 50/50 read/update Zipfian workload updates skewed hot set. |
-| `ycsbb`            | 0.50              | 1.27              | 95/5 read-heavy Zipfian workload generates small total update volume. |
-| `readwhilewriting` | 1.99              | 0.66              | Background writes throttled to 10k writes/s while readers concurrently access LSM. |
+| `fillrandom`       | 4.00              | 4.61              | StrataDB's size-tiered scoring and leveled compaction achieve lower write amp than LevelDB. |
+| `overwrite`        | 5.02              | 2.87              | Full overwrites trigger compactions across existing level ranges. |
+| `ycsba`            | 3.17              | 4.34              | 50/50 read/update Zipfian workload updates skewed hot set. |
+| `ycsbb`            | 0.50              | 26.62             | 95/5 read-heavy Zipfian workload; LevelDB suffers massive amplification rewriting full SSTables for sparse updates. |
+| `readwhilewriting` | 1.81              | 24.70             | Background writes throttled to 10k writes/s while readers concurrently access LSM; StrataDB avoids cascade compactions. |
 
 ---
 

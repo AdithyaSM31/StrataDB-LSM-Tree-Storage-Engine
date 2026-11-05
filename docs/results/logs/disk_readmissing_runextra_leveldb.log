@@ -1,10 +1,11 @@
+Running scope as unit: run-re43ff455866049e893eb4cd1c3dfbcea.scope
 ================================================================================
 StrataDB Benchmark Harness
 ================================================================================
-Run ID:          20261105T130447Z
+Run ID:          20261105T153806Z
 Commit:          96c8e3c6d3b3
 Engines:         leveldb
-Benchmarks:      fillrandom
+Benchmarks:      readmissing
 Entries:         1000000
 Value Size:      100 bytes
 Key Size:        16 bytes
@@ -21,23 +22,13 @@ LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
 YCSB Ops:        1000000 (per workload)
 Zipf Theta:      0.99
 DB Directory:    /home/adith/strata_bench_data
-CSV Output:      /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/memory.csv
+CSV Output:      docs/results/disk.csv
 ================================================================================
 
 --------------------------------------------------------------------------------------------------------------------------
 Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
 --------------------------------------------------------------------------------------------------------------------------
-LevelDB    fillrandom              1     294778.1     32.61      0.97      2.94    1109.89       0  new
-
---- LevelDB Stats ---
-                               Compactions
-Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
---------------------------------------------------
-  0        0        0         1        0       104
-  1        6        8         2      153       156
-  2       50       99         2      251       254
-  3        1        2         0        0         0
-
+LevelDB    readmissing             1      33239.5      0.51      1.39    410.09     575.11       0  fillrandom
 --------------------------------------------------------------------------------------------------------------------------
 
-Results written to: /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/memory.csv
+Results written to: docs/results/disk.csv

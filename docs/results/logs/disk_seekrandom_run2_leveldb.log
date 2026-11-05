@@ -1,8 +1,8 @@
-Running scope as unit: run-r8e422f27ad024f61bb197fe9d096a233.scope
+Running scope as unit: run-r59b90eacc5cd463b802fb67ab93e5e32.scope
 ================================================================================
 StrataDB Benchmark Harness
 ================================================================================
-Run ID:          20261105T130305Z
+Run ID:          20261105T144915Z
 Commit:          96c8e3c6d3b3
 Engines:         leveldb
 Benchmarks:      seekrandom
@@ -22,13 +22,13 @@ LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
 YCSB Ops:        1000000 (per workload)
 Zipf Theta:      0.99
 DB Directory:    /home/adith/strata_bench_data
-CSV Output:      /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/disk.csv
+CSV Output:      docs/results/disk.csv
 ================================================================================
 
 --------------------------------------------------------------------------------------------------------------------------
 Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
 --------------------------------------------------------------------------------------------------------------------------
-LevelDB    seekrandom              1     232515.7     25.72      3.45      5.89     147.33       0  fillrandom
+LevelDB    seekrandom              1       5526.7      0.61    202.02    657.38    1482.48       0  fillrandom
 --------------------------------------------------------------------------------------------------------------------------
 
-Results written to: /mnt/c/Users/adith/Downloads/StrataDB Local/docs/results/disk.csv
+Results written to: docs/results/disk.csv

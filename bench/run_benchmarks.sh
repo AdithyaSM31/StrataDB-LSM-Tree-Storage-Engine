@@ -26,11 +26,15 @@ SYNC_NUM="100000"
 YCSB_OPS=""
 THREADS=1
 RUNS=3
-MEMORY_LIMIT="512M"
+TIER="all"
+MEMORY_LIMIT=""
+MEMORY_LIMIT_SET=0
+RUNNER_UID=""
 DB_DIR=""
 OUTPUT_DIR=""
 SKIP_BUILD=0
 SKIP_FIO=0
+SKIP_SNAPSHOT=0
 DRY_RUN=0
 REPEATABILITY_THRESHOLD=0.10
 
@@ -44,12 +48,15 @@ Options:
   --ycsb-ops=N        Operations for YCSB workloads [default: num]
   --threads=N         Worker threads [default: 1]
   --runs=N            Number of benchmark iterations [default: 3]
-  --memory-limit=SZ   Memory limit for on-disk tier [default: 512M]
+  --tier=TIER         Tier to run: all, memory, disk [default: all]
+  --memory-limit=SZ   Memory limit for on-disk tier [default: 512M for >=5M keys, 64M for <=1M keys]
+  --uid=UID           User for systemd-run [default: ubuntu if exists, else invoking user]
   --db-dir=DIR        Directory for benchmark database [default: /mnt/nvme/strata_bench_data or \$HOME/strata_bench_data]
   --output-dir=DIR    Directory for CSVs and logs [default: bench/results]
   --skip-build        Skip cmake build of bench preset
   --skip-fio          Skip fio raw disk baseline
-  --dry-run           Quick 1M dry run to verify setup and scripts
+  --skip-snapshot     Skip building initial snapshots
+  --dry-run           Quick dry run (1M keys, 64M limit) to verify setup and scripts
   -h, --help          Show this help message
 EOF
   exit 0
@@ -96,8 +103,15 @@ for arg in "$@"; do
     --runs=*)
       RUNS="${arg#*=}"
       ;;
+    --tier=*)
+      TIER="${arg#*=}"
+      ;;
     --memory-limit=*)
       MEMORY_LIMIT="${arg#*=}"
+      MEMORY_LIMIT_SET=1
+      ;;
+    --uid=*)
+      RUNNER_UID="${arg#*=}"
       ;;
     --db-dir=*)
       DB_DIR="${arg#*=}"
@@ -110,6 +124,9 @@ for arg in "$@"; do
       ;;
     --skip-fio)
       SKIP_FIO=1
+      ;;
+    --skip-snapshot)
+      SKIP_SNAPSHOT=1
       ;;
     --dry-run)
       DRY_RUN=1
@@ -131,6 +148,27 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
   if [ "$SYNC_NUM" -eq 100000 ]; then
     SYNC_NUM="1000"
+  fi
+  if [ "$MEMORY_LIMIT_SET" -eq 0 ]; then
+    MEMORY_LIMIT="64M"
+  fi
+fi
+
+if [ -z "$MEMORY_LIMIT" ]; then
+  if [ "$NUM" -ge 5000000 ]; then
+    MEMORY_LIMIT="512M"
+  else
+    MEMORY_LIMIT="64M"
+  fi
+fi
+
+if [ -z "$RUNNER_UID" ]; then
+  if id -u ubuntu >/dev/null 2>&1; then
+    RUNNER_UID="ubuntu"
+  elif [ -n "${SUDO_USER:-}" ]; then
+    RUNNER_UID="$SUDO_USER"
+  else
+    RUNNER_UID="$(id -u)"
   fi
 fi
 
@@ -174,6 +212,7 @@ echo "YCSB Ops:        $YCSB_OPS"
 echo "Threads:         $THREADS"
 echo "Runs:            $RUNS"
 echo "Memory Limit:    $MEMORY_LIMIT"
+echo "Runner UID:      $RUNNER_UID"
 echo "DB Directory:    $DB_DIR"
 echo "Output Directory:$OUTPUT_DIR"
 echo "================================================================================"
@@ -192,7 +231,9 @@ if [ ! -x "$BENCH_BIN" ]; then
 fi
 
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo "unknown")"
-echo "StrataDB Commit: $COMMIT"
+LEVELDB_FEATURES="$("$BENCH_BIN" --engine=leveldb --benchmarks=readseq --num=1 2>&1 | grep "LevelDB Build:" | sed 's/LevelDB Build:[[:space:]]*//' || true)"
+echo "StrataDB Commit:  $COMMIT"
+echo "LevelDB Features: $LEVELDB_FEATURES"
 
 # Drop caches helper
 drop_caches() {
@@ -221,26 +262,33 @@ if [ "$SKIP_FIO" -eq 0 ] && command -v fio >/dev/null 2>&1; then
 fi
 
 # Pristine dataset generation
-echo "--- Creating pristine datasets for StrataDB and LevelDB ($NUM keys) ---"
-TMP_CSV="$(mktemp /tmp/throwaway_XXXXXX.csv)"
-for eng in strata leveldb; do
-  echo "Building snapshot for $eng..."
-  rm -rf "${DB_DIR:?}/${eng}" "${DB_DIR:?}/${eng}.snapshot"
-  "$BENCH_BIN" --engine="$eng" --benchmarks=fillrandom,ycsbc --ycsb_ops=1 \
-      --num="$NUM" --threads="$THREADS" --db="$DB_DIR" --csv="$TMP_CSV" > /dev/null
-  cp -a "${DB_DIR}/${eng}" "${DB_DIR}/${eng}.snapshot"
-  if [ ! -f "${DB_DIR}/${eng}.snapshot/.bench_dataset" ]; then
-    echo "Error: Dataset marker missing in ${DB_DIR}/${eng}.snapshot" >&2
-    rm -f "$TMP_CSV"
-    exit 1
-  fi
-  echo "Snapshot for $eng verified."
-done
-rm -f "$TMP_CSV"
+if [ "$SKIP_SNAPSHOT" -eq 0 ] && { [ "$TIER" = "all" ] || [ "$TIER" = "memory" ] || [ "$TIER" = "disk" ]; }; then
+  echo "--- Creating pristine datasets for StrataDB and LevelDB ($NUM keys) ---"
+  TMP_CSV="$(mktemp /tmp/throwaway_XXXXXX.csv)"
+  for eng in strata leveldb; do
+    echo "Building snapshot for $eng..."
+    rm -rf "${DB_DIR:?}/${eng}" "${DB_DIR:?}/${eng}.snapshot"
+    "$BENCH_BIN" --engine="$eng" --benchmarks=fillrandom,ycsbc --ycsb_ops=1 \
+        --num="$NUM" --threads="$THREADS" --db="$DB_DIR" --csv="$TMP_CSV" > /dev/null
+    cp -a "${DB_DIR}/${eng}" "${DB_DIR}/${eng}.snapshot"
+    if [ ! -f "${DB_DIR}/${eng}.snapshot/.bench_dataset" ]; then
+      echo "Error: Dataset marker missing in ${DB_DIR}/${eng}.snapshot" >&2
+      rm -f "$TMP_CSV"
+      exit 1
+    fi
+    echo "Snapshot for $eng verified."
+  done
+  rm -f "$TMP_CSV"
+fi
 
 MEMORY_CSV="${OUTPUT_DIR}/memory.csv"
 DISK_CSV="${OUTPUT_DIR}/disk.csv"
-rm -f "$MEMORY_CSV" "$DISK_CSV"
+if [ "$TIER" = "all" ] || [ "$TIER" = "memory" ]; then
+  rm -f "$MEMORY_CSV"
+fi
+if [ "$TIER" = "all" ] || [ "$TIER" = "disk" ]; then
+  rm -f "$DISK_CSV"
+fi
 
 # Workload definitions
 MEM_WORKLOADS=("fillseq" "fillrandom" "overwrite" "fillsync" "readseq" "readrandom" \
@@ -304,9 +352,10 @@ run_workload() {
   echo "  [Tier: $tier | Run: $run_idx | Engine: $eng | Workload: $workload]"
   if [ "$is_limited" -eq 1 ]; then
     if command -v systemd-run >/dev/null 2>&1; then
-      sudo systemd-run --scope --uid="$(id -u)" -p "MemoryMax=${MEMORY_LIMIT}" -p "MemorySwapMax=0" \
+      sudo systemd-run --scope --uid="$RUNNER_UID" -p "MemoryMax=${MEMORY_LIMIT}" -p "MemorySwapMax=0" \
           "$BENCH_BIN" "${cmd_args[@]}" > "$log_file" 2>&1 || {
-            local exit_code=$?
+            local exit_code
+            exit_code=$?
             echo "Error running limited workload: exit code $exit_code" >&2
             if [ "$exit_code" -eq 137 ]; then
               echo "Process killed by OOM (exit 137). Consider increasing --memory-limit." >&2
@@ -322,51 +371,55 @@ run_workload() {
   fi
 }
 
-# ==============================================================================
-# Tier 1: In-Memory (No limit)
-# ==============================================================================
-echo ""
-echo "================================================================================"
-echo "Starting Tier 1: In-Memory Benchmarks ($RUNS runs, alternating engines)"
-echo "================================================================================"
+if [ "$TIER" = "all" ] || [ "$TIER" = "memory" ]; then
+  # ==============================================================================
+  # Tier 1: In-Memory (No limit)
+  # ==============================================================================
+  echo ""
+  echo "================================================================================"
+  echo "Starting Tier 1: In-Memory Benchmarks ($RUNS runs, alternating engines)"
+  echo "================================================================================"
 
-for ((run=1; run<=RUNS; run++)); do
-  echo "--- In-Memory Run $run of $RUNS ---"
-  if [ $((run % 2)) -eq 1 ]; then
-    engines=("strata" "leveldb")
-  else
-    engines=("leveldb" "strata")
-  fi
+  for ((run=1; run<=RUNS; run++)); do
+    echo "--- In-Memory Run $run of $RUNS ---"
+    if [ $((run % 2)) -eq 1 ]; then
+      engines=("strata" "leveldb")
+    else
+      engines=("leveldb" "strata")
+    fi
 
-  for w in "${MEM_WORKLOADS[@]}"; do
-    for eng in "${engines[@]}"; do
-      run_workload "memory" "$run" "$eng" "$w" 0 "$MEMORY_CSV"
+    for w in "${MEM_WORKLOADS[@]}"; do
+      for eng in "${engines[@]}"; do
+        run_workload "memory" "$run" "$eng" "$w" 0 "$MEMORY_CSV"
+      done
     done
   done
-done
+fi
 
-# ==============================================================================
-# Tier 2: On-Disk (Memory limited to 512M)
-# ==============================================================================
-echo ""
-echo "================================================================================"
-echo "Starting Tier 2: On-Disk Benchmarks ($RUNS runs, MemoryMax=$MEMORY_LIMIT)"
-echo "================================================================================"
+if [ "$TIER" = "all" ] || [ "$TIER" = "disk" ]; then
+  # ==============================================================================
+  # Tier 2: On-Disk (Memory limited to $MEMORY_LIMIT)
+  # ==============================================================================
+  echo ""
+  echo "================================================================================"
+  echo "Starting Tier 2: On-Disk Benchmarks ($RUNS runs, MemoryMax=$MEMORY_LIMIT)"
+  echo "================================================================================"
 
-for ((run=1; run<=RUNS; run++)); do
-  echo "--- On-Disk Run $run of $RUNS ---"
-  if [ $((run % 2)) -eq 1 ]; then
-    engines=("strata" "leveldb")
-  else
-    engines=("leveldb" "strata")
-  fi
+  for ((run=1; run<=RUNS; run++)); do
+    echo "--- On-Disk Run $run of $RUNS ---"
+    if [ $((run % 2)) -eq 1 ]; then
+      engines=("strata" "leveldb")
+    else
+      engines=("leveldb" "strata")
+    fi
 
-  for w in "${DISK_WORKLOADS[@]}"; do
-    for eng in "${engines[@]}"; do
-      run_workload "disk" "$run" "$eng" "$w" 1 "$DISK_CSV"
+    for w in "${DISK_WORKLOADS[@]}"; do
+      for eng in "${engines[@]}"; do
+        run_workload "disk" "$run" "$eng" "$w" 1 "$DISK_CSV"
+      done
     done
   done
-done
+fi
 
 # ==============================================================================
 # Verification and Validation
@@ -391,7 +444,7 @@ RERUN_FILE="${OUTPUT_DIR}/rerun_candidates.txt"
 rm -f "$RERUN_FILE"
 
 run_analysis() {
-python3 - << 'PYEOF' "$OUTPUT_DIR" "$MEMORY_CSV" "$DISK_CSV" "$REPEATABILITY_THRESHOLD" "$RERUN_FILE"
+python3 - << 'PYEOF' "$OUTPUT_DIR" "$MEMORY_CSV" "$DISK_CSV" "$REPEATABILITY_THRESHOLD" "$RERUN_FILE" "$MEMORY_LIMIT" "$TIER"
 import csv
 import os
 import re
@@ -404,6 +457,8 @@ mem_csv = sys.argv[2]
 disk_csv = sys.argv[3]
 rep_threshold = float(sys.argv[4])
 rerun_file = sys.argv[5]
+memory_limit = sys.argv[6] if len(sys.argv) > 6 else "512M"
+active_tier = sys.argv[7] if len(sys.argv) > 7 else "all"
 
 def load_csv(path):
     rows = []
@@ -439,10 +494,13 @@ def analyze_tier(tier_name, rows):
         if w in ["fillseq", "fillrandom", "fillsync"]:
             continue
         if len(set(levels_list)) > 1:
-            print(f"WARNING: levels_at_start mismatch for {eng} {w}: {levels_list}")
+            print(f"ERROR: levels_at_start mismatch for {eng} {w}: {levels_list}")
             levels_mismatches += 1
     if levels_mismatches == 0:
         print(f"Consistency check ({tier_name}): levels_at_start matched across all snapshot runs.")
+    else:
+        print(f"FATAL: levels_at_start differed across snapshot runs for {tier_name}. Snapshot restore is broken!")
+        sys.exit(1)
 
     # 2. Check repeatability: (max - min) <= threshold * median
     repeatability_warnings = 0
@@ -474,9 +532,15 @@ def analyze_tier(tier_name, rows):
 mem_results, mem_reruns = analyze_tier("In-Memory", mem_rows)
 disk_results, disk_reruns = analyze_tier("On-Disk", disk_rows)
 
+candidate_reruns = []
+if active_tier in ["all", "memory"]:
+    candidate_reruns.extend(mem_reruns)
+if active_tier in ["all", "disk"]:
+    candidate_reruns.extend(disk_reruns)
+
 if not os.path.exists(rerun_file):
     with open(rerun_file, "w") as rf:
-        for t, eng, w in mem_reruns + disk_reruns:
+        for t, eng, w in candidate_reruns:
             rf.write(f"{t},{eng},{w}\n")
 
 # Sanity check: on-disk vs in-memory
@@ -487,9 +551,9 @@ for w in ["readrandom", "readmissing", "seekrandom", "scan", "ycsbc"]:
         disk_val = disk_results.get((eng, w), {}).get("median_ops", 0)
         if mem_val > 0 and disk_val > 0:
             ratio = mem_val / disk_val
-            print(f"{eng:8s} {w:12s}: In-Memory={mem_val:10.1f} ops/s | On-Disk={disk_val:10.1f} ops/s (Speedup: {ratio:.1f}x)")
+            print(f"{eng:8s} {w:12s}: In-Memory={mem_val:10.1f} ops/s | On-Disk={disk_val:10.1f} ops/s (Speedup: {ratio:.2f}x)")
             if disk_val > mem_val:
-                print(f"WARNING: On-disk ({disk_val:.1f}) unexpectedly faster than in-memory ({mem_val:.1f}) for {eng} {w}")
+                print(f"WARNING: On-disk ({disk_val:.1f}) unexpectedly faster than in-memory ({mem_val:.1f}) for {eng} {w} (memory limit may not constrain dataset)")
 
 # Parse Write Amplification from logs
 print("\n--- Write Amplification Analysis ---")
@@ -513,8 +577,22 @@ if os.path.exists(logs_dir):
                     writes = re.findall(r"\s+\d+\s+\d+\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)", content)
                     if writes:
                         total_comp_write = sum(float(x[1]) for x in writes)
-                        num_entries = float(mem_results.get(("LevelDB", w), {}).get("entries", 0) or 1000000)
-                        user_mb = (num_entries * 116.0) / (1024.0 * 1024.0)
+                        user_mb = 0.0
+                        if w in ["fillseq", "fillrandom", "overwrite"]:
+                            num_entries = float(mem_results.get(("LevelDB", w), {}).get("entries", 0) or 1000000)
+                            user_mb = (num_entries * 116.0) / (1024.0 * 1024.0)
+                        elif w in ["ycsba", "ycsbb"]:
+                            m_up = re.search(r"updates:\s+(\d+)\s+ops", content)
+                            if m_up:
+                                user_mb = (float(m_up.group(1)) * 116.0) / (1024.0 * 1024.0)
+                            else:
+                                factor = 0.5 if w == "ycsba" else 0.05
+                                num_entries = float(mem_results.get(("LevelDB", w), {}).get("entries", 0) or 1000000)
+                                user_mb = (num_entries * factor * 116.0) / (1024.0 * 1024.0)
+                        elif w == "readwhilewriting":
+                            m_wr = re.search(r"writer:\s+(\d+)\s+writes", content)
+                            if m_wr:
+                                user_mb = (float(m_wr.group(1)) * 116.0) / (1024.0 * 1024.0)
                         if user_mb > 0:
                             amp_results["LevelDB"][w].append(total_comp_write / user_mb)
 
@@ -538,7 +616,7 @@ with open(summary_md_path, "w") as sm:
         sm.write(row)
         print(row.strip())
 
-    sm.write("\n## On-Disk Tier (MemoryMax=512M)\n\n")
+    sm.write(f"\n## On-Disk Tier (MemoryMax={memory_limit})\n\n")
     sm.write("| Workload | Entries | StrataDB ops/s | LevelDB ops/s | StrataDB p99 | LevelDB p99 |\n")
     sm.write("|----------|---------|----------------|---------------|--------------|-------------|\n")
     for w in ["readrandom", "readmissing", "seekrandom", "scan", "ycsbc"]:
@@ -586,6 +664,7 @@ if [ -f "$RERUN_FILE" ] && [ -s "$RERUN_FILE" ]; then
   rm -f "$RERUN_FILE"
   echo "Re-analyzing with extra runs included..."
   run_analysis
+  rm -f "$RERUN_FILE"
 fi
 
 echo ""
