@@ -56,7 +56,10 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG -fno-omit-frame-pointer",
-        "STRATA_BUILD_TESTS": "OFF"
+        "STRATA_BUILD_TESTS": "OFF",
+        "STRATA_BUILD_BENCH": "ON",
+        "STRATA_DEBUG_CHECKS": "OFF",
+        "STRATA_WERROR": "ON"
       }
     }
   ],
