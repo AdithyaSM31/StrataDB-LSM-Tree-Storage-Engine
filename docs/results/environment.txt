@@ -1,0 +1,216 @@
+date: 2026-11-06T15:48:35Z
+args: --num=10M --sync-num=100K --workload-timeout=10800 --db-dir=/mnt/strata/data --output-dir=/home/azureuser/results-10m
+commit: 2cdc2ebfbee8
+uncommitted files: 9
+memory limit: 512M
+read-ahead: 128 KB on sdb, was 4096 KB
+workload time limit: 10800s
+database disk: /dev/sdb1 (root filesystem: /dev/sda1)
+
+Linux stratadb-bench 7.0.0-1017-azure #17~24.04.1-Ubuntu SMP PREEMPT Thu Sep 24 18:46:57 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+cmake version 3.28.3
+
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           46 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               GenuineIntel
+Model name:                              Intel(R) Xeon(R) Platinum 8272CL CPU @ 2.60GHz
+CPU family:                              6
+Model:                                   85
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+Stepping:                                7
+BogoMIPS:                                5187.81
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch tpr_shadow ept vpid ept_ad fsgsbase bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap clflushopt clwb avx512cd avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves vnmi avx512_vnni arch_capabilities
+Virtualization:                          VT-x
+Hypervisor vendor:                       Microsoft
+Virtualization type:                     full
+L1d cache:                               64 KiB (2 instances)
+L1i cache:                               64 KiB (2 instances)
+L2 cache:                                2 MiB (2 instances)
+L3 cache:                                35.8 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Mitigation; Aligned branch/return thunks
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Vulnerable: Clear CPU buffers attempted, no microcode; SMT Host state unknown
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Vulnerable
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Vulnerable
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Retpoline
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Vulnerable: Clear CPU buffers attempted, no microcode; SMT Host state unknown
+Vulnerability Vmscape:                   Not affected
+
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       564Mi        14Gi       4.0Mi       593Mi        15Gi
+Swap:             0B          0B          0B
+
+NAME     SIZE TRAN MODEL           MOUNTPOINT
+sda       64G      Virtual Disk    
+├─sda1    63G                      /
+├─sda14    4M                      
+├─sda15  106M                      /boot/efi
+└─sda16  913M                      /boot
+sdb      150G      Virtual Disk    
+└─sdb1   150G                      /mnt
+sr0      628K      Virtual DVD-ROM 
+
+TARGET SOURCE    FSTYPE OPTIONS
+/mnt   /dev/sdb1 ext4   rw,noatime
+
+/home/azureuser/results-10m/logs/disk_readmissing_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readmissing_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_readrandom_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_scan_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_seekrandom_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/disk_ycsbc_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillrandom_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillrandom_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillrandom_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillrandom_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillrandom_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillrandom_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillseq_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillseq_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillseq_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillseq_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillseq_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillseq_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillsync_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillsync_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillsync_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillsync_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillsync_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_fillsync_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_overwrite_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_overwrite_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_overwrite_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_overwrite_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_overwrite_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_overwrite_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readmissing_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readrandom_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readseq_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readseq_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readseq_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readseq_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readseq_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readseq_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readwhilewriting_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readwhilewriting_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readwhilewriting_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readwhilewriting_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readwhilewriting_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_readwhilewriting_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_scan_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_seekrandom_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsba_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsba_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsba_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsba_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsba_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsba_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbb_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbb_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbb_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbb_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbb_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbb_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run1_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run1_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run1_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run2_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run2_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run2_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run3_leveldb-nommap.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run3_leveldb.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+/home/azureuser/results-10m/logs/memory_ycsbc_run3_strata.log:LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no

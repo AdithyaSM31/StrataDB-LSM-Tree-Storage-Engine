@@ -1,0 +1,12 @@
+Read limit of the temp disk, measured on 2026-11-06 straight after the benchmark
+run, on the same VM, with no database running. 20 seconds each, on an 8 GiB file.
+
+fio --rw=randread --ioengine=libaio --direct=1 --bs=<bs> --iodepth=<qd>
+
+bs=128k qd=4        235.6 MiB/s      1884 IOPS
+bs=128k qd=16       236.1 MiB/s      1888 IOPS
+bs=64k qd=8         235.9 MiB/s      3774 IOPS
+bs=4k qd=1           32.3 MiB/s      8264 IOPS
+bs=4k qd=32         153.6 MiB/s     39316 IOPS
+
+236 MiB/s is about 247 MB/s, which matches Azure's 250 MBps limit for this disk.
