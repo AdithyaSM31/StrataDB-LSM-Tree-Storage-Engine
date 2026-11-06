@@ -63,7 +63,11 @@ class BenchmarkAdapter {
 };
 
 std::unique_ptr<BenchmarkAdapter> CreateStrataAdapter();
-std::unique_ptr<BenchmarkAdapter> CreateLevelDBAdapter();
+// LevelDB maps its table files by default, so its index and filter blocks stay in
+// the page cache and its data blocks never enter its block cache. With use_mmap
+// false it reads with pread, as StrataDB does, and reports its name as
+// "LevelDB-nommap". Both use the same files on disk.
+std::unique_ptr<BenchmarkAdapter> CreateLevelDBAdapter(bool use_mmap);
 
 }  // namespace strata::bench
 

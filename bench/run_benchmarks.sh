@@ -1,676 +1,412 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# bench/run_benchmarks.sh
-# Automated StrataDB vs LevelDB benchmark runner for two-tier evaluation:
-#   1. In-memory tier (no memory limit, CPU path)
-#   2. On-disk tier (MemoryMax=512M, real NVMe reads)
+# Runs StrataDB and LevelDB through strata_bench in two tiers, then summarises the results.
 #
-# Requirements met:
-#   - Builds with CMake preset 'bench'
-#   - Records git commit and LevelDB features
-#   - Creates pristine datasets and restores snapshots per workload
-#   - Drops OS page cache before every workload run
-#   - 3 runs per workload, alternating engine order (StrataDB / LevelDB)
-#   - Write amplification extraction from --stats logs
-#   - Verifications: levels_at_start match, repeatability <= 10%, check_ycsb_mix.awk
-# ==============================================================================
+#   memory  no memory limit and a warm page cache, so disk reads don't touch the numbers
+#   disk    a cgroup memory limit and a dropped page cache, so reads reach the disk
+#
+# Read-ahead on the database's disk is set for the run and put back afterwards, because it changes
+# results: Azure images use 4 MB, and under the memory limit that made LevelDB's mmap reads 18
+# times slower than at the usual 128 KB.
+#
+# Every workload except fillseq, fillrandom and fillsync starts from a copy of one snapshot.
+# Read workloads also run LevelDB with mmap off, which shows how much of a result comes from
+# LevelDB's default of mapping its files. Any failed run stops the script with a non-zero exit,
+# because a median over fewer runs would look like a good result.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Defaults
-NUM="10000000"
-SYNC_NUM="100000"
+NUM=10000000
+SYNC_NUM=100000
 YCSB_OPS=""
 THREADS=1
 RUNS=3
-TIER="all"
+TIER=all
 MEMORY_LIMIT=""
-MEMORY_LIMIT_SET=0
 RUNNER_UID=""
 DB_DIR=""
-OUTPUT_DIR=""
+OUTPUT_DIR="${REPO_ROOT}/bench/results"
+FIO_SECONDS=30
+READ_AHEAD_KB=128
+WORKLOAD_TIMEOUT=10800
 SKIP_BUILD=0
 SKIP_FIO=0
 SKIP_SNAPSHOT=0
+REPORT_ONLY=0
 DRY_RUN=0
-REPEATABILITY_THRESHOLD=0.10
 
 usage() {
   cat << EOF
-Usage: $(basename "$0") [options]
+Usage: $(basename "$0") --db-dir=DIR [options]
 
-Options:
-  --num=N             Number of keys/entries (e.g. 10M, 1M, 100K) [default: 10M]
-  --sync-num=N        Number of sync writes for fillsync [default: 100K, or min(num, 100K)]
-  --ycsb-ops=N        Operations for YCSB workloads [default: num]
+  --db-dir=DIR        Where the databases go. Put this on the disk being measured. Required.
+  --num=N             Keys, with K, M or G [default: 10M]
+  --sync-num=N        Writes for fillsync [default: 100K, never more than --num]
+  --ycsb-ops=N        Operations per YCSB workload [default: --num]
   --threads=N         Worker threads [default: 1]
-  --runs=N            Number of benchmark iterations [default: 3]
-  --tier=TIER         Tier to run: all, memory, disk [default: all]
-  --memory-limit=SZ   Memory limit for on-disk tier [default: 512M for >=5M keys, 64M for <=1M keys]
-  --uid=UID           User for systemd-run [default: ubuntu if exists, else invoking user]
-  --db-dir=DIR        Directory for benchmark database [default: /mnt/nvme/strata_bench_data or \$HOME/strata_bench_data]
-  --output-dir=DIR    Directory for CSVs and logs [default: bench/results]
-  --skip-build        Skip cmake build of bench preset
-  --skip-fio          Skip fio raw disk baseline
-  --skip-snapshot     Skip building initial snapshots
-  --dry-run           Quick dry run (1M keys, 64M limit) to verify setup and scripts
-  -h, --help          Show this help message
+  --runs=N            Runs per workload and engine [default: 3]
+  --tier=TIER         all, memory or disk [default: all]
+  --memory-limit=SZ   Limit for the disk tier [default: 512M from 5M keys, otherwise 64M]
+  --uid=USER          User that runs the memory-limited process [default: the invoking user]
+  --output-dir=DIR    CSVs, logs and summary [default: bench/results]
+  --read-ahead-kb=N   Read-ahead on the database's disk during the run [default: 128]
+  --workload-timeout=SEC  Fail if one workload takes longer than this [default: 10800]
+  --skip-build       Use the existing build/bench/strata_bench
+  --skip-fio          Skip the raw disk baseline
+  --skip-snapshot     Reuse the snapshots already in --db-dir
+  --dry-run           1M keys, 1,000 sync writes and a short fio run, unless set otherwise
+  --report-only       Only re-check and re-summarise the results in --output-dir
+  -h, --help          Show this message
 EOF
-  exit 0
+}
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
 }
 
 parse_human_number() {
-  local input="$1"
   local upper
-  upper="$(echo "$input" | tr '[:lower:]' '[:upper:]')"
+  upper="$(echo "$1" | tr '[:lower:]' '[:upper:]')"
   case "$upper" in
-    *K)
-      local val="${upper%K}"
-      echo "$(( val * 1000 ))"
-      ;;
-    *M)
-      local val="${upper%M}"
-      echo "$(( val * 1000000 ))"
-      ;;
-    *G)
-      local val="${upper%G}"
-      echo "$(( val * 1000000000 ))"
-      ;;
-    *)
-      echo "$input"
-      ;;
+    *K) echo "$((${upper%K} * 1000))" ;;
+    *M) echo "$((${upper%M} * 1000000))" ;;
+    *G) echo "$((${upper%G} * 1000000000))" ;;
+    *) echo "$upper" ;;
   esac
 }
 
-# Parse command line arguments
+NUM_SET=0
+SYNC_NUM_SET=0
 for arg in "$@"; do
   case "$arg" in
-    --num=*)
-      NUM="$(parse_human_number "${arg#*=}")"
-      ;;
-    --sync-num=*)
-      SYNC_NUM="$(parse_human_number "${arg#*=}")"
-      ;;
-    --ycsb-ops=*)
-      YCSB_OPS="$(parse_human_number "${arg#*=}")"
-      ;;
-    --threads=*)
-      THREADS="${arg#*=}"
-      ;;
-    --runs=*)
-      RUNS="${arg#*=}"
-      ;;
-    --tier=*)
-      TIER="${arg#*=}"
-      ;;
-    --memory-limit=*)
-      MEMORY_LIMIT="${arg#*=}"
-      MEMORY_LIMIT_SET=1
-      ;;
-    --uid=*)
-      RUNNER_UID="${arg#*=}"
-      ;;
-    --db-dir=*)
-      DB_DIR="${arg#*=}"
-      ;;
-    --output-dir=*)
-      OUTPUT_DIR="${arg#*=}"
-      ;;
-    --skip-build)
-      SKIP_BUILD=1
-      ;;
-    --skip-fio)
-      SKIP_FIO=1
-      ;;
-    --skip-snapshot)
-      SKIP_SNAPSHOT=1
-      ;;
-    --dry-run)
-      DRY_RUN=1
-      ;;
-    -h|--help)
-      usage
-      ;;
-    *)
-      echo "Unknown option: $arg" >&2
-      usage
-      ;;
+    --num=*) NUM="$(parse_human_number "${arg#*=}")"; NUM_SET=1 ;;
+    --sync-num=*) SYNC_NUM="$(parse_human_number "${arg#*=}")"; SYNC_NUM_SET=1 ;;
+    --ycsb-ops=*) YCSB_OPS="$(parse_human_number "${arg#*=}")" ;;
+    --threads=*) THREADS="${arg#*=}" ;;
+    --runs=*) RUNS="${arg#*=}" ;;
+    --tier=*) TIER="${arg#*=}" ;;
+    --memory-limit=*) MEMORY_LIMIT="${arg#*=}" ;;
+    --uid=*) RUNNER_UID="${arg#*=}" ;;
+    --db-dir=*) DB_DIR="${arg#*=}" ;;
+    --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
+    --read-ahead-kb=*) READ_AHEAD_KB="${arg#*=}" ;;
+    --workload-timeout=*) WORKLOAD_TIMEOUT="${arg#*=}" ;;
+    --skip-build) SKIP_BUILD=1 ;;
+    --skip-fio) SKIP_FIO=1 ;;
+    --skip-snapshot) SKIP_SNAPSHOT=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --report-only) REPORT_ONLY=1 ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; die "unknown option: $arg" ;;
   esac
 done
 
+case "$TIER" in
+  all | memory | disk) ;;
+  *) die "--tier must be all, memory or disk, not $TIER" ;;
+esac
+
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "=== Running in DRY RUN mode ==="
-  if [ "$NUM" -eq 10000000 ]; then
-    NUM="1000000"
-  fi
-  if [ "$SYNC_NUM" -eq 100000 ]; then
-    SYNC_NUM="1000"
-  fi
-  if [ "$MEMORY_LIMIT_SET" -eq 0 ]; then
-    MEMORY_LIMIT="64M"
-  fi
+  [ "$NUM_SET" -eq 1 ] || NUM=1000000
+  [ "$SYNC_NUM_SET" -eq 1 ] || SYNC_NUM=1000
+  FIO_SECONDS=5
 fi
-
+[ -n "$YCSB_OPS" ] || YCSB_OPS="$NUM"
+[ "$SYNC_NUM" -le "$NUM" ] || SYNC_NUM="$NUM"
 if [ -z "$MEMORY_LIMIT" ]; then
-  if [ "$NUM" -ge 5000000 ]; then
-    MEMORY_LIMIT="512M"
-  else
-    MEMORY_LIMIT="64M"
-  fi
+  if [ "$NUM" -ge 5000000 ]; then MEMORY_LIMIT=512M; else MEMORY_LIMIT=64M; fi
 fi
+[ -n "$RUNNER_UID" ] || RUNNER_UID="${SUDO_USER:-$(id -un)}"
 
-if [ -z "$RUNNER_UID" ]; then
-  if id -u ubuntu >/dev/null 2>&1; then
-    RUNNER_UID="ubuntu"
-  elif [ -n "${SUDO_USER:-}" ]; then
-    RUNNER_UID="$SUDO_USER"
-  else
-    RUNNER_UID="$(id -u)"
-  fi
-fi
-
-if [ -z "$YCSB_OPS" ]; then
-  YCSB_OPS="$NUM"
-fi
-
-# Ensure SYNC_NUM does not exceed NUM
-if [ "$SYNC_NUM" -gt "$NUM" ]; then
-  SYNC_NUM="$NUM"
-fi
-
-# Determine default DB directory
-if [ -z "$DB_DIR" ]; then
-  if [ -d "/mnt/nvme" ] && mountpoint -q "/mnt/nvme" 2>/dev/null; then
-    DB_DIR="/mnt/nvme/strata_bench_data"
-  elif [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
-    DB_DIR="${HOME}/strata_bench_data"
-  elif [ -d "/tmp" ]; then
-    DB_DIR="/tmp/strata_bench_data"
-  else
-    DB_DIR="${REPO_ROOT}/strata_bench_data"
-  fi
-fi
-
-# Determine default Output directory
-if [ -z "$OUTPUT_DIR" ]; then
-  OUTPUT_DIR="${REPO_ROOT}/bench/results"
-fi
-
-mkdir -p "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/logs"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+MEMORY_CSV="${OUTPUT_DIR}/memory.csv"
+DISK_CSV="${OUTPUT_DIR}/disk.csv"
+
+summarize() {
+  local failed=0
+  if [ -f "$MEMORY_CSV" ]; then
+    awk -f "${SCRIPT_DIR}/check_ycsb_mix.awk" "$MEMORY_CSV" || {
+      echo "YCSB mix check FAILED" >&2
+      failed=1
+    }
+  fi
+  python3 "${SCRIPT_DIR}/summarize_results.py" "$OUTPUT_DIR" --runs="$RUNS" || failed=1
+  return "$failed"
+}
+
+if [ "$REPORT_ONLY" -eq 1 ]; then
+  summarize
+  exit 0
+fi
+
+[ -n "$DB_DIR" ] || die "--db-dir is required: without it the run could land on the wrong disk"
 mkdir -p "$DB_DIR"
+DB_DIR="$(cd "$DB_DIR" && pwd)"
 
 echo "================================================================================"
-echo "StrataDB vs LevelDB Benchmark Suite"
-echo "================================================================================"
-echo "Keys/Entries:    $NUM"
-echo "Sync Ops:        $SYNC_NUM"
-echo "YCSB Ops:        $YCSB_OPS"
-echo "Threads:         $THREADS"
-echo "Runs:            $RUNS"
-echo "Memory Limit:    $MEMORY_LIMIT"
-echo "Runner UID:      $RUNNER_UID"
-echo "DB Directory:    $DB_DIR"
-echo "Output Directory:$OUTPUT_DIR"
+echo "Keys:         $NUM"
+echo "Sync writes:  $SYNC_NUM"
+echo "YCSB ops:     $YCSB_OPS"
+echo "Threads:      $THREADS"
+echo "Runs:         $RUNS"
+echo "Tier:         $TIER"
+echo "Memory limit: $MEMORY_LIMIT, run as $RUNNER_UID"
+echo "Databases:    $DB_DIR"
+echo "Results:      $OUTPUT_DIR"
 echo "================================================================================"
 
-# Build preset if requested
 if [ "$SKIP_BUILD" -eq 0 ]; then
-  echo "--- Building bench preset ---"
-  cmake --preset bench -B "${REPO_ROOT}/build/bench" -S "${REPO_ROOT}"
-  cmake --build "${REPO_ROOT}/build/bench" --preset bench
+  cmake --preset bench -S "$REPO_ROOT"
+  cmake --build "${REPO_ROOT}/build/bench" --target strata_bench
 fi
-
 BENCH_BIN="${REPO_ROOT}/build/bench/strata_bench"
-if [ ! -x "$BENCH_BIN" ]; then
-  echo "Error: Benchmark executable not found at $BENCH_BIN" >&2
-  exit 1
+[ -x "$BENCH_BIN" ] || die "$BENCH_BIN not found"
+
+# The run can't mean anything without these, so they are checked before any time is spent.
+if [ "$(id -u)" -ne 0 ]; then
+  sudo -n true 2> /dev/null || die "this script needs passwordless sudo"
+fi
+if [ "$TIER" != memory ]; then
+  command -v systemd-run > /dev/null || die "the disk tier needs systemd-run"
 fi
 
-COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo "unknown")"
-LEVELDB_FEATURES="$("$BENCH_BIN" --engine=leveldb --benchmarks=readseq --num=1 2>&1 | grep "LevelDB Build:" | sed 's/LevelDB Build:[[:space:]]*//' || true)"
-echo "StrataDB Commit:  $COMMIT"
-echo "LevelDB Features: $LEVELDB_FEATURES"
+READ_AHEAD_FILE=""
+ORIGINAL_READ_AHEAD=""
+READ_AHEAD_NOTE="unknown"
+set_read_ahead() {
+  local source device
+  source="$(findmnt -no SOURCE -T "$DB_DIR" 2> /dev/null || true)"
+  device="$(lsblk -ndo PKNAME "$source" 2> /dev/null || true)"
+  [ -n "$device" ] || device="$(basename "${source:-unknown}")"
+  if [ ! -w "/sys/block/${device}/queue/read_ahead_kb" ] && [ ! -e "/sys/block/${device}/queue/read_ahead_kb" ]; then
+    echo "WARNING: can't find the read-ahead setting for ${source:-the database disk}." >&2
+    return 0
+  fi
+  READ_AHEAD_FILE="/sys/block/${device}/queue/read_ahead_kb"
+  ORIGINAL_READ_AHEAD="$(cat "$READ_AHEAD_FILE")"
+  echo "$READ_AHEAD_KB" | sudo tee "$READ_AHEAD_FILE" > /dev/null
+  [ "$(cat "$READ_AHEAD_FILE")" = "$READ_AHEAD_KB" ] || die "could not set read-ahead on $device"
+  READ_AHEAD_NOTE="${READ_AHEAD_KB} KB on ${device}, was ${ORIGINAL_READ_AHEAD} KB"
+  echo "Read-ahead:   $READ_AHEAD_NOTE"
+}
 
-# Drop caches helper
-drop_caches() {
-  sync
-  if [ "$EUID" -eq 0 ]; then
-    echo 3 > /proc/sys/vm/drop_caches
-  elif command -v sudo >/dev/null 2>&1; then
-    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-  else
-    echo "Warning: cannot drop caches (no root/sudo)" >&2
+restore_read_ahead() {
+  if [ -n "$READ_AHEAD_FILE" ]; then
+    echo "$ORIGINAL_READ_AHEAD" | sudo tee "$READ_AHEAD_FILE" > /dev/null || true
+    READ_AHEAD_FILE=""
   fi
 }
 
-# Raw disk baseline with fio
-if [ "$SKIP_FIO" -eq 0 ] && command -v fio >/dev/null 2>&1; then
-  echo "--- Running fio disk baseline ---"
-  FIO_LOG="${OUTPUT_DIR}/fio_baseline.txt"
-  FIO_TEST_FILE="${DB_DIR}/fio_test_tmp.dat"
-  fio --name=baseline_randread --filename="$FIO_TEST_FILE" --size=512M --rw=randread \
-      --bs=4k --direct=1 --numjobs=1 --time_based --runtime=5s --group_reporting \
-      --name=baseline_randwrite --filename="$FIO_TEST_FILE" --size=512M --rw=randwrite \
-      --bs=4k --direct=1 --numjobs=1 --time_based --runtime=5s --group_reporting \
-      > "$FIO_LOG" 2>&1 || true
-  rm -f "$FIO_TEST_FILE"
-  echo "fio baseline saved to $FIO_LOG"
-fi
+drop_caches() {
+  sync
+  if [ "$(id -u)" -eq 0 ]; then
+    echo 3 > /proc/sys/vm/drop_caches
+  else
+    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+  fi
+}
 
-# Pristine dataset generation
-if [ "$SKIP_SNAPSHOT" -eq 0 ] && { [ "$TIER" = "all" ] || [ "$TIER" = "memory" ] || [ "$TIER" = "disk" ]; }; then
-  echo "--- Creating pristine datasets for StrataDB and LevelDB ($NUM keys) ---"
-  TMP_CSV="$(mktemp /tmp/throwaway_XXXXXX.csv)"
+record_environment() {
+  local dir_source root_source
+  dir_source="$(findmnt -no SOURCE -T "$DB_DIR" 2> /dev/null || echo unknown)"
+  root_source="$(findmnt -no SOURCE -T / 2> /dev/null || echo unknown)"
+  {
+    echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "args: $*"
+    echo "commit: $(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2> /dev/null || echo unknown)"
+    echo "uncommitted files: $(git -C "$REPO_ROOT" status --porcelain 2> /dev/null | wc -l)"
+    echo "memory limit: $MEMORY_LIMIT"
+    echo "read-ahead: $READ_AHEAD_NOTE"
+    echo "workload time limit: ${WORKLOAD_TIMEOUT}s"
+    echo "database disk: $dir_source (root filesystem: $root_source)"
+    echo; uname -a
+    echo; grep PRETTY_NAME /etc/os-release || true
+    echo; gcc --version | head -1 || true
+    cmake --version | head -1 || true
+    echo; lscpu
+    echo; free -h
+    echo; lsblk -o NAME,SIZE,TRAN,MODEL,MOUNTPOINT || true
+    echo; findmnt -T "$DB_DIR" || true
+    echo; grep -m1 "LevelDB Build" "${OUTPUT_DIR}"/logs/*.log 2> /dev/null || true
+  } > "${OUTPUT_DIR}/environment.txt"
+  if [ "$dir_source" = "$root_source" ]; then
+    echo "WARNING: --db-dir is on the root filesystem ($dir_source)." >&2
+    echo "         On a cloud VM that is usually the remote OS disk, not local storage." >&2
+  fi
+}
+
+# Reads and writes run one after the other: --stonewall stops them sharing the disk.
+run_fio() {
+  local log="${OUTPUT_DIR}/fio_baseline.txt"
+  local file="${DB_DIR}/fio_test.dat"
+  if ! command -v fio > /dev/null; then
+    echo "WARNING: fio is not installed, so there is no raw disk baseline." >&2
+    return 0
+  fi
+  echo "--- fio baseline"
+  fio --filename="$file" --size=1G --bs=4k --direct=1 --iodepth=1 --time_based \
+      --runtime="${FIO_SECONDS}s" \
+      --name=randread --rw=randread \
+      --name=randwrite --rw=randwrite --stonewall \
+      > "$log" 2>&1 || die "fio failed, see $log"
+  rm -f "$file"
+}
+
+engine_dir() {
+  if [ "$1" = strata ]; then echo strata; else echo leveldb; fi
+}
+
+build_snapshots() {
+  local eng tmp_csv
+  tmp_csv="$(mktemp)"
   for eng in strata leveldb; do
-    echo "Building snapshot for $eng..."
+    echo "--- building the $eng snapshot"
     rm -rf "${DB_DIR:?}/${eng}" "${DB_DIR:?}/${eng}.snapshot"
-    "$BENCH_BIN" --engine="$eng" --benchmarks=fillrandom,ycsbc --ycsb_ops=1 \
-        --num="$NUM" --threads="$THREADS" --db="$DB_DIR" --csv="$TMP_CSV" > /dev/null
+    # The one YCSB operation makes the harness settle compactions before it closes the database.
+    "$BENCH_BIN" --engine="$eng" --benchmarks=fillrandom,ycsbc --ycsb_ops=1 --num="$NUM" \
+        --threads="$THREADS" --db="$DB_DIR" --csv="$tmp_csv" > /dev/null
     cp -a "${DB_DIR}/${eng}" "${DB_DIR}/${eng}.snapshot"
-    if [ ! -f "${DB_DIR}/${eng}.snapshot/.bench_dataset" ]; then
-      echo "Error: Dataset marker missing in ${DB_DIR}/${eng}.snapshot" >&2
-      rm -f "$TMP_CSV"
-      exit 1
-    fi
-    echo "Snapshot for $eng verified."
+    [ -f "${DB_DIR}/${eng}.snapshot/.bench_dataset" ] || die "no dataset marker in the $eng snapshot"
   done
-  rm -f "$TMP_CSV"
-fi
-
-MEMORY_CSV="${OUTPUT_DIR}/memory.csv"
-DISK_CSV="${OUTPUT_DIR}/disk.csv"
-if [ "$TIER" = "all" ] || [ "$TIER" = "memory" ]; then
-  rm -f "$MEMORY_CSV"
-fi
-if [ "$TIER" = "all" ] || [ "$TIER" = "disk" ]; then
-  rm -f "$DISK_CSV"
-fi
-
-# Workload definitions
-MEM_WORKLOADS=("fillseq" "fillrandom" "overwrite" "fillsync" "readseq" "readrandom" \
-               "readmissing" "seekrandom" "scan" "ycsbc" "ycsbb" "ycsba" "readwhilewriting")
-DISK_WORKLOADS=("readrandom" "readmissing" "seekrandom" "scan" "ycsbc")
+  rm -f "$tmp_csv"
+}
 
 is_fresh_workload() {
-  local w="$1"
-  [ "$w" = "fillseq" ] || [ "$w" = "fillrandom" ] || [ "$w" = "fillsync" ]
+  case "$1" in
+    fillseq | fillrandom | fillsync) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 is_write_workload() {
-  local w="$1"
-  [ "$w" = "fillseq" ] || [ "$w" = "fillrandom" ] || [ "$w" = "overwrite" ] || \
-  [ "$w" = "fillsync" ] || [ "$w" = "readwhilewriting" ] || [ "$w" = "ycsba" ] || [ "$w" = "ycsbb" ]
+  case "$1" in
+    fillseq | fillrandom | overwrite | fillsync | readwhilewriting | ycsba | ycsbb) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 run_workload() {
-  local tier="$1"
-  local run_idx="$2"
-  local eng="$3"
-  local workload="$4"
-  local is_limited="$5"
-  local csv_file="$6"
+  local tier="$1" run="$2" eng="$3" workload="$4" csv="$5"
+  local dir log status=0
+  dir="$(engine_dir "$eng")"
+  log="${OUTPUT_DIR}/logs/${tier}_${workload}_run${run}_${eng}.log"
 
-  local log_file="${OUTPUT_DIR}/logs/${tier}_${workload}_run${run_idx}_${eng}.log"
-
-  # Restore state
-  if is_fresh_workload "$workload"; then
-    rm -rf "${DB_DIR:?}/${eng}"
-  else
-    rm -rf "${DB_DIR:?}/${eng}"
-    cp -a "${DB_DIR}/${eng}.snapshot" "${DB_DIR}/${eng}"
+  rm -rf "${DB_DIR:?}/${dir}"
+  if ! is_fresh_workload "$workload"; then
+    cp -a "${DB_DIR}/${dir}.snapshot" "${DB_DIR}/${dir}"
+  fi
+  if [ "$tier" = disk ]; then
+    drop_caches
+  elif ! is_fresh_workload "$workload"; then
+    sync
+    cat "${DB_DIR}/${dir}"/* > /dev/null
   fi
 
-  # Drop page cache
-  drop_caches
-
-  # Build command args
-  local -a cmd_args=(
-    "--engine=${eng}"
-    "--benchmarks=${workload}"
-    "--num=${NUM}"
-    "--threads=${THREADS}"
-    "--db=${DB_DIR}"
-    "--csv=${csv_file}"
+  local -a args=(
+    "--engine=$(if [ "$eng" = strata ]; then echo strata; else echo leveldb; fi)"
+    "--benchmarks=${workload}" "--num=${NUM}" "--threads=${THREADS}" "--db=${DB_DIR}"
+    "--csv=${csv}"
   )
+  [ "$eng" != leveldb-nommap ] || args+=("--leveldb_mmap=0")
+  [ "$workload" != fillsync ] || args+=("--sync_num=${SYNC_NUM}")
+  is_write_workload "$workload" && args+=("--stats")
+  case "$workload" in
+    ycsb*) args+=("--ycsb_ops=${YCSB_OPS}") ;;
+  esac
 
-  if [ "$workload" = "fillsync" ]; then
-    cmd_args+=("--sync_num=${SYNC_NUM}")
-  fi
-
-  if is_write_workload "$workload"; then
-    cmd_args+=("--stats")
-  fi
-
-  if [[ "$workload" =~ ^ycsb ]]; then
-    cmd_args+=("--ycsb_ops=${YCSB_OPS}")
-  fi
-
-  echo "  [Tier: $tier | Run: $run_idx | Engine: $eng | Workload: $workload]"
-  if [ "$is_limited" -eq 1 ]; then
-    if command -v systemd-run >/dev/null 2>&1; then
-      sudo systemd-run --scope --uid="$RUNNER_UID" -p "MemoryMax=${MEMORY_LIMIT}" -p "MemorySwapMax=0" \
-          "$BENCH_BIN" "${cmd_args[@]}" > "$log_file" 2>&1 || {
-            local exit_code
-            exit_code=$?
-            echo "Error running limited workload: exit code $exit_code" >&2
-            if [ "$exit_code" -eq 137 ]; then
-              echo "Process killed by OOM (exit 137). Consider increasing --memory-limit." >&2
-            fi
-            return $exit_code
-          }
-    else
-      echo "Warning: systemd-run not found, running without memory limit" >&2
-      "$BENCH_BIN" "${cmd_args[@]}" > "$log_file" 2>&1
-    fi
+  echo "  [$tier | run $run | $eng | $workload]"
+  local -a limited=(timeout --kill-after=30 "$WORKLOAD_TIMEOUT" "$BENCH_BIN" "${args[@]}")
+  if [ "$tier" = disk ]; then
+    sudo systemd-run --scope --quiet --uid="$RUNNER_UID" -p "MemoryMax=${MEMORY_LIMIT}" \
+        -p MemorySwapMax=0 "${limited[@]}" > "$log" 2>&1 || status=$?
   else
-    "$BENCH_BIN" "${cmd_args[@]}" > "$log_file" 2>&1
+    "${limited[@]}" > "$log" 2>&1 || status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    tail -n 5 "$log" >&2
+    if [ "$status" -eq 124 ]; then
+      die "$eng $workload passed the time limit of ${WORKLOAD_TIMEOUT}s. Something is wrong with this run."
+    fi
+    if [ "$status" -eq 137 ]; then
+      die "$eng $workload was killed, most likely out of memory. Try a larger --memory-limit."
+    fi
+    die "$eng $workload exited with status $status, see $log"
   fi
 }
 
-if [ "$TIER" = "all" ] || [ "$TIER" = "memory" ]; then
-  # ==============================================================================
-  # Tier 1: In-Memory (No limit)
-  # ==============================================================================
-  echo ""
-  echo "================================================================================"
-  echo "Starting Tier 1: In-Memory Benchmarks ($RUNS runs, alternating engines)"
-  echo "================================================================================"
+MEMORY_WORKLOADS=(fillseq fillrandom overwrite fillsync readseq readrandom readmissing seekrandom
+                  scan ycsbc ycsbb ycsba readwhilewriting)
+DISK_WORKLOADS=(readrandom readmissing seekrandom scan ycsbc)
 
-  for ((run=1; run<=RUNS; run++)); do
-    echo "--- In-Memory Run $run of $RUNS ---"
-    if [ $((run % 2)) -eq 1 ]; then
-      engines=("strata" "leveldb")
-    else
-      engines=("leveldb" "strata")
-    fi
-
-    for w in "${MEM_WORKLOADS[@]}"; do
-      for eng in "${engines[@]}"; do
-        run_workload "memory" "$run" "$eng" "$w" 0 "$MEMORY_CSV"
-      done
-    done
-  done
-fi
-
-if [ "$TIER" = "all" ] || [ "$TIER" = "disk" ]; then
-  # ==============================================================================
-  # Tier 2: On-Disk (Memory limited to $MEMORY_LIMIT)
-  # ==============================================================================
-  echo ""
-  echo "================================================================================"
-  echo "Starting Tier 2: On-Disk Benchmarks ($RUNS runs, MemoryMax=$MEMORY_LIMIT)"
-  echo "================================================================================"
-
-  for ((run=1; run<=RUNS; run++)); do
-    echo "--- On-Disk Run $run of $RUNS ---"
-    if [ $((run % 2)) -eq 1 ]; then
-      engines=("strata" "leveldb")
-    else
-      engines=("leveldb" "strata")
-    fi
-
-    for w in "${DISK_WORKLOADS[@]}"; do
-      for eng in "${engines[@]}"; do
-        run_workload "disk" "$run" "$eng" "$w" 1 "$DISK_CSV"
-      done
-    done
-  done
-fi
-
-# ==============================================================================
-# Verification and Validation
-# ==============================================================================
-echo ""
-echo "================================================================================"
-echo "Running Validation & Sanity Checks"
-echo "================================================================================"
-
-# Check YCSB mix on memory tier
-if [ -f "${SCRIPT_DIR}/check_ycsb_mix.awk" ]; then
-  echo "Checking YCSB read/update mix on in-memory CSV..."
-  if awk -f "${SCRIPT_DIR}/check_ycsb_mix.awk" "$MEMORY_CSV"; then
-    echo "YCSB mix check PASSED."
+# Workloads that only read also run LevelDB with mmap off. Engine order alternates between runs.
+engines_for() {
+  local workload="$1" run="$2"
+  local -a engines=(strata leveldb)
+  case "$workload" in
+    readrandom | readmissing | seekrandom | scan | ycsbc) engines+=(leveldb-nommap) ;;
+  esac
+  if [ $((run % 2)) -eq 0 ]; then
+    local i
+    for ((i = ${#engines[@]} - 1; i >= 0; i--)); do echo "${engines[i]}"; done
   else
-    echo "YCSB mix check FAILED." >&2
+    printf '%s\n' "${engines[@]}"
   fi
-fi
-
-# Python verification & summary generator
-RERUN_FILE="${OUTPUT_DIR}/rerun_candidates.txt"
-rm -f "$RERUN_FILE"
-
-run_analysis() {
-python3 - << 'PYEOF' "$OUTPUT_DIR" "$MEMORY_CSV" "$DISK_CSV" "$REPEATABILITY_THRESHOLD" "$RERUN_FILE" "$MEMORY_LIMIT" "$TIER"
-import csv
-import os
-import re
-import sys
-from collections import defaultdict
-import statistics
-
-output_dir = sys.argv[1]
-mem_csv = sys.argv[2]
-disk_csv = sys.argv[3]
-rep_threshold = float(sys.argv[4])
-rerun_file = sys.argv[5]
-memory_limit = sys.argv[6] if len(sys.argv) > 6 else "512M"
-active_tier = sys.argv[7] if len(sys.argv) > 7 else "all"
-
-def load_csv(path):
-    rows = []
-    if not os.path.exists(path):
-        return rows
-    with open(path, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            rows.append(r)
-    return rows
-
-mem_rows = load_csv(mem_csv)
-disk_rows = load_csv(disk_csv)
-
-def analyze_tier(tier_name, rows):
-    print(f"\n--- Analysis for {tier_name} Tier ---")
-    grouped = defaultdict(lambda: {"ops": [], "p99": [], "entries": ""})
-    levels_map = defaultdict(list)
-    for r in rows:
-        eng = r["engine"]
-        w = r["workload"]
-        ops = float(r["ops_per_sec"])
-        p99 = float(r["p99_us"])
-        grouped[(eng, w)]["ops"].append(ops)
-        grouped[(eng, w)]["p99"].append(p99)
-        grouped[(eng, w)]["entries"] = r.get("entries", "")
-        levels = r.get("levels_at_start", "-")
-        levels_map[(eng, w)].append(levels)
-
-    # 1. Check levels_at_start consistency across runs
-    levels_mismatches = 0
-    for (eng, w), levels_list in levels_map.items():
-        if w in ["fillseq", "fillrandom", "fillsync"]:
-            continue
-        if len(set(levels_list)) > 1:
-            print(f"ERROR: levels_at_start mismatch for {eng} {w}: {levels_list}")
-            levels_mismatches += 1
-    if levels_mismatches == 0:
-        print(f"Consistency check ({tier_name}): levels_at_start matched across all snapshot runs.")
-    else:
-        print(f"FATAL: levels_at_start differed across snapshot runs for {tier_name}. Snapshot restore is broken!")
-        sys.exit(1)
-
-    # 2. Check repeatability: (max - min) <= threshold * median
-    repeatability_warnings = 0
-    results = {}
-    reruns = []
-    for (eng, w), data in grouped.items():
-        ops_list = data["ops"]
-        p99_list = data["p99"]
-        med_ops = statistics.median(ops_list)
-        med_p99 = statistics.median(p99_list)
-        min_ops = min(ops_list)
-        max_ops = max(ops_list)
-        if len(ops_list) > 1 and med_ops > 0:
-            diff = (max_ops - min_ops) / med_ops
-            if diff > rep_threshold:
-                print(f"NOTE: Repeatability variation for {eng} {w}: (max-min)/median = {diff*100:.1f}% (> {rep_threshold*100:.0f}%) [runs: {[round(x, 1) for x in ops_list]}]")
-                repeatability_warnings += 1
-                t_str = "disk" if "disk" in tier_name.lower() else "memory"
-                eng_str = "strata" if "strata" in eng.lower() else "leveldb"
-                reruns.append((t_str, eng_str, w))
-        results[(eng, w)] = {
-            "entries": data["entries"],
-            "median_ops": med_ops,
-            "median_p99": med_p99,
-        }
-
-    return results, reruns
-
-mem_results, mem_reruns = analyze_tier("In-Memory", mem_rows)
-disk_results, disk_reruns = analyze_tier("On-Disk", disk_rows)
-
-candidate_reruns = []
-if active_tier in ["all", "memory"]:
-    candidate_reruns.extend(mem_reruns)
-if active_tier in ["all", "disk"]:
-    candidate_reruns.extend(disk_reruns)
-
-if not os.path.exists(rerun_file):
-    with open(rerun_file, "w") as rf:
-        for t, eng, w in candidate_reruns:
-            rf.write(f"{t},{eng},{w}\n")
-
-# Sanity check: on-disk vs in-memory
-print("\n--- Sanity Check: On-Disk vs In-Memory ---")
-for w in ["readrandom", "readmissing", "seekrandom", "scan", "ycsbc"]:
-    for eng in ["StrataDB", "LevelDB"]:
-        mem_val = mem_results.get((eng, w), {}).get("median_ops", 0)
-        disk_val = disk_results.get((eng, w), {}).get("median_ops", 0)
-        if mem_val > 0 and disk_val > 0:
-            ratio = mem_val / disk_val
-            print(f"{eng:8s} {w:12s}: In-Memory={mem_val:10.1f} ops/s | On-Disk={disk_val:10.1f} ops/s (Speedup: {ratio:.2f}x)")
-            if disk_val > mem_val:
-                print(f"WARNING: On-disk ({disk_val:.1f}) unexpectedly faster than in-memory ({mem_val:.1f}) for {eng} {w} (memory limit may not constrain dataset)")
-
-# Parse Write Amplification from logs
-print("\n--- Write Amplification Analysis ---")
-logs_dir = os.path.join(output_dir, "logs")
-amp_results = defaultdict(lambda: defaultdict(list))
-if os.path.exists(logs_dir):
-    for f in sorted(os.listdir(logs_dir)):
-        if "memory" in f and any(w in f for w in ["fillseq", "fillrandom", "overwrite", "ycsba", "ycsbb", "readwhilewriting"]):
-            filepath = os.path.join(logs_dir, f)
-            with open(filepath, "r", errors="ignore") as lf:
-                content = lf.read()
-                parts = f.replace(".log", "").split("_")
-                w = parts[1]
-                eng = "StrataDB" if "strata" in f else "LevelDB"
-                if eng == "StrataDB":
-                    m = re.search(r"Write amplification:\s+([0-9.]+)", content)
-                    if m:
-                        amp = float(m.group(1))
-                        amp_results["StrataDB"][w].append(amp)
-                else:
-                    writes = re.findall(r"\s+\d+\s+\d+\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)", content)
-                    if writes:
-                        total_comp_write = sum(float(x[1]) for x in writes)
-                        user_mb = 0.0
-                        if w in ["fillseq", "fillrandom", "overwrite"]:
-                            num_entries = float(mem_results.get(("LevelDB", w), {}).get("entries", 0) or 1000000)
-                            user_mb = (num_entries * 116.0) / (1024.0 * 1024.0)
-                        elif w in ["ycsba", "ycsbb"]:
-                            m_up = re.search(r"updates:\s+(\d+)\s+ops", content)
-                            if m_up:
-                                user_mb = (float(m_up.group(1)) * 116.0) / (1024.0 * 1024.0)
-                            else:
-                                factor = 0.5 if w == "ycsba" else 0.05
-                                num_entries = float(mem_results.get(("LevelDB", w), {}).get("entries", 0) or 1000000)
-                                user_mb = (num_entries * factor * 116.0) / (1024.0 * 1024.0)
-                        elif w == "readwhilewriting":
-                            m_wr = re.search(r"writer:\s+(\d+)\s+writes", content)
-                            if m_wr:
-                                user_mb = (float(m_wr.group(1)) * 116.0) / (1024.0 * 1024.0)
-                        if user_mb > 0:
-                            amp_results["LevelDB"][w].append(total_comp_write / user_mb)
-
-summary_md_path = os.path.join(output_dir, "summary.md")
-with open(summary_md_path, "w") as sm:
-    sm.write("# Benchmark Results Summary\n\n")
-    sm.write("## In-Memory Tier (No Limit)\n\n")
-    sm.write("| Workload | Entries | StrataDB ops/s | LevelDB ops/s | StrataDB p99 | LevelDB p99 |\n")
-    sm.write("|----------|---------|----------------|---------------|--------------|-------------|\n")
-    all_workloads = ["fillseq", "fillrandom", "overwrite", "fillsync", "readseq", "readrandom",
-                     "readmissing", "seekrandom", "scan", "ycsbc", "ycsbb", "ycsba", "readwhilewriting"]
-    for w in all_workloads:
-        s_data = mem_results.get(("StrataDB", w), {})
-        l_data = mem_results.get(("LevelDB", w), {})
-        entries = s_data.get("entries") or l_data.get("entries") or "-"
-        s_ops = f"{s_data.get('median_ops', 0):.1f}" if "median_ops" in s_data else "-"
-        l_ops = f"{l_data.get('median_ops', 0):.1f}" if "median_ops" in l_data else "-"
-        s_p99 = f"{s_data.get('median_p99', 0):.2f}" if "median_p99" in s_data else "-"
-        l_p99 = f"{l_data.get('median_p99', 0):.2f}" if "median_p99" in l_data else "-"
-        row = f"| {w:<16} | {entries:<7} | {s_ops:<14} | {l_ops:<13} | {s_p99:<12} | {l_p99:<11} |\n"
-        sm.write(row)
-        print(row.strip())
-
-    sm.write(f"\n## On-Disk Tier (MemoryMax={memory_limit})\n\n")
-    sm.write("| Workload | Entries | StrataDB ops/s | LevelDB ops/s | StrataDB p99 | LevelDB p99 |\n")
-    sm.write("|----------|---------|----------------|---------------|--------------|-------------|\n")
-    for w in ["readrandom", "readmissing", "seekrandom", "scan", "ycsbc"]:
-        s_data = disk_results.get(("StrataDB", w), {})
-        l_data = disk_results.get(("LevelDB", w), {})
-        entries = s_data.get("entries") or l_data.get("entries") or "-"
-        s_ops = f"{s_data.get('median_ops', 0):.1f}" if "median_ops" in s_data else "-"
-        l_ops = f"{l_data.get('median_ops', 0):.1f}" if "median_ops" in l_data else "-"
-        s_p99 = f"{s_data.get('median_p99', 0):.2f}" if "median_p99" in s_data else "-"
-        l_p99 = f"{l_data.get('median_p99', 0):.2f}" if "median_p99" in l_data else "-"
-        row = f"| {w:<16} | {entries:<7} | {s_ops:<14} | {l_ops:<13} | {s_p99:<12} | {l_p99:<11} |\n"
-        sm.write(row)
-        print(row.strip())
-
-    sm.write("\n## Write Amplification\n\n")
-    sm.write("| Workload | StrataDB Write Amp | LevelDB Write Amp |\n")
-    sm.write("|----------|-------------------|-------------------|\n")
-    for w in ["fillseq", "fillrandom", "overwrite", "ycsba", "ycsbb", "readwhilewriting"]:
-        s_amp_list = amp_results["StrataDB"].get(w, [])
-        l_amp_list = amp_results["LevelDB"].get(w, [])
-        s_amp_str = f"{statistics.median(s_amp_list):.2f}" if s_amp_list else "-"
-        l_amp_str = f"{statistics.median(l_amp_list):.2f}" if l_amp_list else "-"
-        sm.write(f"| {w:<16} | {s_amp_str:<17} | {l_amp_str:<17} |\n")
-
-print(f"\nMarkdown summary saved to: {summary_md_path}")
-PYEOF
 }
 
-run_analysis
+run_tier() {
+  local tier="$1" csv="$2"
+  shift 2
+  local run workload eng
+  rm -f "$csv" "${OUTPUT_DIR}/logs/${tier}_"*.log
+  for ((run = 1; run <= RUNS; run++)); do
+    echo "--- $tier tier, run $run of $RUNS"
+    for workload in "$@"; do
+      for eng in $(engines_for "$workload" "$run"); do
+        run_workload "$tier" "$run" "$eng" "$workload" "$csv"
+      done
+    done
+  done
+}
 
-# Optional Repeatability Rerun (1 pass)
-if [ -f "$RERUN_FILE" ] && [ -s "$RERUN_FILE" ]; then
-  echo ""
-  echo "--- Repeatability Rerun for High-Variance Workloads ---"
-  while IFS=',' read -r t eng w; do
-    echo "Rerunning high-variance workload: tier=$t, engine=$eng, workload=$w"
-    is_lim=0
-    csv="$MEMORY_CSV"
-    if [ "$t" = "ondisk" ] || [ "$t" = "disk" ]; then
-      is_lim=1
-      csv="$DISK_CSV"
-    fi
-    run_workload "$t" "extra" "$eng" "$w" "$is_lim" "$csv"
-  done < "$RERUN_FILE"
-  rm -f "$RERUN_FILE"
-  echo "Re-analyzing with extra runs included..."
-  run_analysis
-  rm -f "$RERUN_FILE"
+IOSTAT_PID=""
+stop_iostat() {
+  if [ -n "$IOSTAT_PID" ]; then
+    kill "$IOSTAT_PID" 2> /dev/null || true
+    wait "$IOSTAT_PID" 2> /dev/null || true
+    IOSTAT_PID=""
+  fi
+}
+trap 'stop_iostat; restore_read_ahead' EXIT
+trap 'exit 143' TERM INT
+
+# Shows whether a run is sitting at the disk's IOPS or throughput cap.
+start_iostat() {
+  if command -v iostat > /dev/null; then
+    iostat -xmt 5 > "${OUTPUT_DIR}/iostat_disk.log" &
+    IOSTAT_PID=$!
+  else
+    echo "WARNING: iostat is not installed, so disk caps can't be checked afterwards." >&2
+  fi
+}
+
+set_read_ahead
+record_environment "$@"
+[ "$SKIP_FIO" -eq 1 ] || run_fio
+[ "$SKIP_SNAPSHOT" -eq 1 ] || build_snapshots
+
+if [ "$TIER" != disk ]; then
+  run_tier memory "$MEMORY_CSV" "${MEMORY_WORKLOADS[@]}"
+fi
+if [ "$TIER" != memory ]; then
+  start_iostat
+  run_tier disk "$DISK_CSV" "${DISK_WORKLOADS[@]}"
+  stop_iostat
 fi
 
-echo ""
-echo "================================================================================"
-echo "Benchmarks complete!"
-echo "Raw CSVs: $MEMORY_CSV, $DISK_CSV"
-echo "Logs: $OUTPUT_DIR/logs/"
-echo "Summary: $OUTPUT_DIR/summary.md"
-echo "================================================================================"
+record_environment "$@"
+summarize
+echo "Done. Results are in $OUTPUT_DIR"

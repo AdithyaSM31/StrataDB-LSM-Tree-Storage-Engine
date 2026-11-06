@@ -86,6 +86,7 @@ struct BenchConfig {
   uint64_t write_rate = 10000;  // readwhilewriting writes per second; 0 means unthrottled
   size_t ycsb_ops = 0;          // 0 means: use num (overridden per-run if set)
   double zipf_theta = 0.99;     // Zipfian skew parameter; must be in (0, 1)
+  bool leveldb_mmap = true;     // LevelDB's default; false makes it read with pread
   bool stats = false;
   std::string csv_path = "bench/results/benchmarks.csv";
   std::string run_id;
@@ -139,15 +140,18 @@ std::string FormatKey(uint64_t k) {
 
 // A key that can never exist but still falls inside the stored key range, so
 // lookups have to consult files and their bloom filters instead of being ruled
-// out by the files' key ranges. '.' sorts just before '0', which places
-// "...12." between "...119" and "...120".
+// out by the files' key ranges. Stored keys are 16 digits, so "<k>." sorts
+// between k and k + 1.
+//
+// Don't make these keys differ from stored ones in only the last byte. Replacing
+// the last digit with '.' gave a key one byte away from ten stored keys in the
+// same block. LevelDB's per-block filters let 18.6% of those through, and only
+// 0.90% of these, which turned a 1.5x difference between the engines into 34x.
 std::string FormatMissingKey(uint64_t k, uint64_t num_entries) {
-  if (k < 10 && num_entries > 10) {
-    k += 10;  // keys 0-9 would otherwise sort before the smallest stored key
+  if (k + 1 >= num_entries && k > 0) {
+    --k;  // the gap after the largest stored key is outside the key range
   }
-  std::string key = FormatKey(k);
-  key.back() = '.';
-  return key;
+  return FormatKey(k) + ".";
 }
 
 class ValueGenerator {
@@ -291,6 +295,7 @@ void PrintConfig(const BenchConfig& cfg) {
   std::cout << "Compression:     none on both engines\n"
             << "Checksums:       every block read verified on both engines\n"
             << "LevelDB Build:   " << STRATA_BENCH_LEVELDB_FEATURES << "\n"
+            << "LevelDB Reads:   " << (cfg.leveldb_mmap ? "mmap" : "pread") << "\n"
             << "YCSB Ops:        " << (cfg.ycsb_ops > 0 ? cfg.ycsb_ops : cfg.num)
             << " (per workload)\n"
             << "Zipf Theta:      " << cfg.zipf_theta << "\n"
@@ -1171,6 +1176,8 @@ void PrintUsage() {
          "(default: bench/results/benchmarks.csv)\n"
       << "  --ycsb_ops=N                     Operations for YCSB workloads (default: num)\n"
       << "  --zipf_theta=F                   Zipfian skew in (0,1); 0.99 is YCSB default\n"
+      << "  --leveldb_mmap=0|1               0 makes LevelDB read with pread, and reports it as\n"
+      << "                                   LevelDB-nommap (default: 1)\n"
       << "\n"
       << "Workloads: fillseq fillrandom overwrite fillsync readseq readrandom readmissing\n"
       << "           seekrandom scan ycsbc ycsbb ycsba readwhilewriting\n"
@@ -1258,6 +1265,13 @@ std::optional<int> ParseArgs(int argc, char* argv[], BenchConfig* cfg) {
       } else {
         cfg->zipf_theta = parsed_theta;
       }
+    } else if (value_of("--leveldb_mmap=", &value)) {
+      if (value != "0" && value != "1") {
+        std::cerr << "Invalid value: " << arg << " (must be 0 or 1)\n";
+        ok = false;
+      } else {
+        cfg->leveldb_mmap = value == "1";
+      }
     } else if (value_of("--csv=", &value)) {
       cfg->csv_path = value;
     } else if (arg == "--stats" || arg == "--stats=1" || arg == "--stats=true") {
@@ -1322,8 +1336,8 @@ int RunMain(int argc, char* argv[]) {
 
   int failures = 0;
   for (const std::string& engine : engines) {
-    BenchmarkRunner runner(cfg,
-                           engine == "strata" ? CreateStrataAdapter() : CreateLevelDBAdapter());
+    BenchmarkRunner runner(
+        cfg, engine == "strata" ? CreateStrataAdapter() : CreateLevelDBAdapter(cfg.leveldb_mmap));
     failures += runner.RunWorkloads(workloads);
   }
 

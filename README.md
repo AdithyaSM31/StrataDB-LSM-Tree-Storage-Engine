@@ -97,7 +97,9 @@ Print each engine's stats, including write amplification, after a fill. Stats ar
 ./build/bench/strata_bench --num=1000000 --benchmarks=fillrandom --stats
 ```
 
-`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). YCSB workloads can be tuned with `--ycsb_ops=N` (defaults to `--num`) and `--zipf_theta=F` (skew parameter in `(0, 1)`, default `0.99`). Run `strata_bench --help` for every option.
+`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). YCSB workloads can be tuned with `--ycsb_ops=N` (defaults to `--num`) and `--zipf_theta=F` (skew parameter in `(0, 1)`, default `0.99`). `--leveldb_mmap=0` makes LevelDB read with `pread` instead of its default `mmap`, and reports it as `LevelDB-nommap`. Run `strata_bench --help` for every option.
+
+To run the full comparison on a machine, with repeated runs, cache control and a summary, use `bench/run_benchmarks.sh`. [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has the steps.
 
 ### Supported Workloads
 
