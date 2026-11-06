@@ -18,6 +18,7 @@ struct BenchmarkOptions {
   size_t block_cache_size = size_t{8} * 1024 * 1024;  // 0 turns the block cache off
   int bloom_filter_bits = 10;                         // 0 writes no filters
   int max_open_files = 1000;
+  bool group_commit = true;  // StrataDB only: LevelDB has no way to turn it off
   bool create_if_missing = true;
   bool error_if_exists = false;
 };
@@ -60,6 +61,8 @@ class BenchmarkAdapter {
   virtual std::string Stats() = 0;
   // Replaces *shapes with the files and bytes at each level, L0 first.
   virtual Status LevelShapes(std::vector<LevelShape>* shapes) = 0;
+  // Block cache lookups since Open, including those made by compactions.
+  virtual Status BlockCacheStats(uint64_t* hits, uint64_t* misses) = 0;
 };
 
 std::unique_ptr<BenchmarkAdapter> CreateStrataAdapter();

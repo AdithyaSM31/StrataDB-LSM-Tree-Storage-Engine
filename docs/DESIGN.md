@@ -29,7 +29,7 @@ Status CompactRange(std::string_view begin, std::string_view end);
 bool GetProperty(std::string_view name, std::string* value);
 ```
 
-`WriteOptions::sync` picks the durability level for a write. `ReadOptions` can name a snapshot and can skip filling the block cache. The properties are `strata.stats`, `strata.num-files-at-level<N>` and `strata.recovery`. A `DB` is safe to use from multiple threads.
+`WriteOptions::sync` picks the durability level for a write. `ReadOptions` can name a snapshot and can skip filling the block cache. The properties are `strata.stats`, `strata.num-files-at-level<N>`, `strata.recovery`, `strata.block-cache-hits` and `strata.block-cache-misses`. A `DB` is safe to use from multiple threads.
 
 ## Architecture: write path and read path
 
@@ -52,7 +52,7 @@ flush to an L0 SSTable                      |
 leveled compaction, L0 down to L6         index block, data block (block cache first)
 ```
 
-**Writes.** Writers join a queue, and the one at the front becomes the leader. It makes room if the memtable is full, merges queued batches into one, assigns sequence numbers, appends one WAL record, syncs if asked, and inserts into the memtable. `LastSequence` only moves after that, so readers never see a half-applied group.
+**Writes.** Writers join a queue, and the one at the front becomes the leader. It makes room if the memtable is full, merges queued batches into one, assigns sequence numbers, appends one WAL record, syncs if asked, and inserts into the memtable. `LastSequence` only moves after that, so readers never see a half-applied group. `Options::group_commit = false` stops the merging, which exists only to measure what group commit is worth.
 
 **Reads.** `Get` takes the mutex just long enough to pick a sequence number and reference the memtables and the current version. The lookup itself runs without the lock. The first version found for the key decides the answer, and a tombstone returns NotFound, so older files can't bring a deleted value back.
 
@@ -229,7 +229,7 @@ ThreadSanitizer runs on every push and has to stay clean.
 
 | What | How |
 |---|---|
-| Each unit | One `*_test.cc` per component, 447 tests labelled `unit` |
+| Each unit | One `*_test.cc` per component, 450 tests labelled `unit` |
 | Logic against a model | `model_test`: randomized operations, reopens, snapshots and `CompactRange` checked against a `std::map`, plus bidirectional iterator fuzzing |
 | Power loss | `FaultInjectionEnv` drops unsynced data. `crash_test` checks synced writes, the prefix property and batch atomicity, and crashes at every file operation of a run with flushes and a compaction |
 | Process death | `kill_test`: 1,000 cycles of fork, write and `SIGKILL`, verifying everything the child confirmed durable |
@@ -237,7 +237,7 @@ ThreadSanitizer runs on every push and has to stay clean.
 | Damaged files | Bit flips and truncation across WAL records and SSTables: each must be detected or harmless, and must never return wrong data |
 | Memory and races | ASan, UBSan and TSan builds in CI |
 
-The release build runs 466 tests in total, with 19 labelled `slow`. CI runs ASan with UBSan, TSan and release builds with GCC and Clang, a `clang-format` check, a benchmark smoke test and a test of the benchmark runner.
+The release build runs 469 tests in total, with 19 labelled `slow`. CI runs ASan with UBSan, TSan and release builds with GCC and Clang, a `clang-format` check, a benchmark smoke test, and tests of the benchmark harness and runner.
 
 ## Trade-offs and what I would change
 

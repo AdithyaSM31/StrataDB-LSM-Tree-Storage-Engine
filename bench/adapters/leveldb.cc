@@ -1,6 +1,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -95,6 +96,38 @@ class NoMmapEnv final : public leveldb::EnvWrapper {
   }
 };
 
+// LevelDB's cache has no hit counters, so count at its interface. With mmap reads
+// data blocks are never inserted, so every lookup misses, which is what really
+// happens there.
+class CountingCache final : public leveldb::Cache {
+ public:
+  explicit CountingCache(size_t capacity) : target_(leveldb::NewLRUCache(capacity)) {}
+
+  Handle* Insert(const leveldb::Slice& key, void* value, size_t charge,
+                 void (*deleter)(const leveldb::Slice& key, void* value)) override {
+    return target_->Insert(key, value, charge, deleter);
+  }
+  Handle* Lookup(const leveldb::Slice& key) override {
+    Handle* const handle = target_->Lookup(key);
+    (handle != nullptr ? hits_ : misses_).fetch_add(1, std::memory_order_relaxed);
+    return handle;
+  }
+  void Release(Handle* handle) override { target_->Release(handle); }
+  void* Value(Handle* handle) override { return target_->Value(handle); }
+  void Erase(const leveldb::Slice& key) override { target_->Erase(key); }
+  uint64_t NewId() override { return target_->NewId(); }
+  void Prune() override { target_->Prune(); }
+  size_t TotalCharge() const override { return target_->TotalCharge(); }
+
+  uint64_t hits() const { return hits_.load(std::memory_order_relaxed); }
+  uint64_t misses() const { return misses_.load(std::memory_order_relaxed); }
+
+ private:
+  std::unique_ptr<leveldb::Cache> target_;
+  std::atomic<uint64_t> hits_{0};
+  std::atomic<uint64_t> misses_{0};
+};
+
 class LevelDBCursor : public BenchmarkCursor {
  public:
   explicit LevelDBCursor(leveldb::Iterator* iter) : iter_(iter) {}
@@ -147,7 +180,7 @@ class LevelDBAdapter final : public BenchmarkAdapter {
 
     // Always pass a cache: with none, LevelDB creates its own 8 MB cache, while
     // capacity 0 really does turn caching off.
-    cache_.reset(leveldb::NewLRUCache(options.block_cache_size));
+    cache_ = std::make_unique<CountingCache>(options.block_cache_size);
     l_opts.block_cache = cache_.get();
 
     if (options.bloom_filter_bits > 0) {
@@ -251,6 +284,15 @@ class LevelDBAdapter final : public BenchmarkAdapter {
     return Status::OK();
   }
 
+  Status BlockCacheStats(uint64_t* hits, uint64_t* misses) override {
+    if (cache_ == nullptr) {
+      return Status::InvalidArgument("DB is not open");
+    }
+    *hits = cache_->hits();
+    *misses = cache_->misses();
+    return Status::OK();
+  }
+
  private:
   // The database uses the cache and the filter policy, so it must go first.
   void CloseDatabase() {
@@ -261,7 +303,7 @@ class LevelDBAdapter final : public BenchmarkAdapter {
 
   std::unique_ptr<NoMmapEnv> no_mmap_env_;  // null when LevelDB uses its default mmap reads
   std::unique_ptr<const leveldb::FilterPolicy> filter_policy_;
-  std::unique_ptr<leveldb::Cache> cache_;
+  std::unique_ptr<CountingCache> cache_;
   std::unique_ptr<leveldb::DB> db_;
 };
 

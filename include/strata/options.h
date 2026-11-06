@@ -97,6 +97,12 @@ struct Options {
   // Default: 10 MB
   uint64_t max_bytes_for_level_base = uint64_t{10} * 1024 * 1024;
 
+  // Lets a write leader combine queued writes into one WAL record and one sync.
+  // Turning it off gives every write its own record and sync, which only makes
+  // sense for measuring what group commit is worth.
+  // Default: true
+  bool group_commit = true;
+
   Options() : env(Env::Default()) {}
 };
 

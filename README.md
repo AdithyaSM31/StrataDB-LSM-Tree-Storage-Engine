@@ -97,7 +97,7 @@ Print each engine's stats, including write amplification, after a fill. Stats ar
 ./build/bench/strata_bench --num=1000000 --benchmarks=fillrandom --stats
 ```
 
-`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). YCSB workloads can be tuned with `--ycsb_ops=N` (defaults to `--num`) and `--zipf_theta=F` (skew parameter in `(0, 1)`, default `0.99`). `--leveldb_mmap=0` makes LevelDB read with `pread` instead of its default `mmap`, and reports it as `LevelDB-nommap`. Run `strata_bench --help` for every option.
+`--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). YCSB workloads can be tuned with `--ycsb_ops=N` (defaults to `--num`) and `--zipf_theta=F` (skew parameter in `(0, 1)`, default `0.99`). `--leveldb_mmap=0` makes LevelDB read with `pread` instead of its default `mmap`, and reports it as `LevelDB-nommap`. `--group_commit=0` gives every StrataDB write its own WAL record and sync, and needs `--engine=strata`. `--timeseries=PATH` writes progress and files per level during write workloads, every `--timeseries_interval_ms` (default 1000). Run `strata_bench --help` for every option.
 
 To run the full comparison on a machine, with repeated runs, cache control and a summary, use `bench/run_benchmarks.sh`. [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has the steps.
 
@@ -134,7 +134,7 @@ Every read is checked: keys must be found with the right value size, missing key
 - **Key sequences**: the same seeds give both engines the same keys in the same order.
 - **Latency recording**: each thread has its own `Histogram` on its own cache lines; they are merged after the run.
 
-Each run prints its options, the commit and LevelDB's optional dependencies. Results are appended to `bench/results/benchmarks.csv` with a run ID and the options, so repeat runs can be told apart. YCSB rows also record the skew, the read and update counts, and each side's latency percentiles.
+Each run prints its options, the commit and LevelDB's optional dependencies. Results are appended to `bench/results/benchmarks.csv` with a run ID and the options, so repeat runs can be told apart. YCSB rows also record the skew, the read and update counts, and each side's latency percentiles. Every row records whether group commit was on, and the block cache hits and misses during the workload. A CSV from an older version has different columns, so move it aside or pass another `--csv`.
 
 ## Durability
 

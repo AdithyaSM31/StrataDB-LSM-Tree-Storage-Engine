@@ -665,6 +665,9 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
   }
 
   *last_writer = first;
+  if (!options_.group_commit) {
+    return result;
+  }
   auto iter = writers_.begin();
   ++iter;  // advance past first
   for (; iter != writers_.end(); ++iter) {
@@ -1298,6 +1301,14 @@ bool DBImpl::GetProperty(std::string_view name, std::string* value) {
   if (name == "strata.recovery") {
     // "OK", or why the last Open stopped replaying the WAL early.
     *value = recovery_status_.ok() ? "OK" : recovery_status_.ToString();
+    return true;
+  }
+  if (name == "strata.block-cache-hits") {
+    *value = std::to_string(block_cache_ != nullptr ? block_cache_->hits() : 0);
+    return true;
+  }
+  if (name == "strata.block-cache-misses") {
+    *value = std::to_string(block_cache_ != nullptr ? block_cache_->misses() : 0);
     return true;
   }
   constexpr std::string_view kNumFilesPrefix = "strata.num-files-at-level";
