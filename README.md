@@ -3,7 +3,20 @@
 An embedded key-value storage engine in C++20, built as a log-structured merge tree:
 write-ahead log, skiplist memtable, SSTables with bloom filters, and leveled compaction.
 
-> Status: **Week 5: benchmarks, profiling and write-up.** Standalone benchmark harness with LevelDB adapter in place. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+It's a learning project, compared directly against LevelDB 1.23. On a 10M-key dataset LevelDB is still faster on most workloads, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) shows by how much and why. [`docs/DESIGN.md`](docs/DESIGN.md) covers the formats, compaction and trade-offs.
+
+```mermaid
+flowchart LR
+  W[Write] --> Q[Writer queue<br/>group commit]
+  Q --> WAL[WAL]
+  Q --> MT[Memtable<br/>skiplist]
+  MT -->|full, flush| L0[L0 SSTables]
+  L0 -->|leveled compaction| LN[L1 to L6 SSTables]
+  R[Read] --> MT
+  R --> L0
+  R --> LN
+  LN -.-> BF[Each SSTable: bloom filter,<br/>index, data blocks, block cache]
+```
 
 ## Build and test
 
@@ -52,7 +65,7 @@ src/table/        blocks, SSTable builder and reader, iterators
 src/db/           DBImpl, versions, compaction, DBIter
 tests/            one *_test.cc per unit, plus model / crash / kill tests
 bench/            strata_bench and engine adapters
-tools/            sst_dump, manifest_dump
+tools/            sst_dump
 docs/             DESIGN.md, BENCHMARKS.md, ROADMAP.md
 ```
 
@@ -99,7 +112,7 @@ Print each engine's stats, including write amplification, after a fill. Stats ar
 
 `--num` and the other count flags accept `K`, `M` and `G` (`--num=10M`). YCSB workloads can be tuned with `--ycsb_ops=N` (defaults to `--num`) and `--zipf_theta=F` (skew parameter in `(0, 1)`, default `0.99`). `--leveldb_mmap=0` makes LevelDB read with `pread` instead of its default `mmap`, and reports it as `LevelDB-nommap`. `--group_commit=0` gives every StrataDB write its own WAL record and sync, and needs `--engine=strata`. `--timeseries=PATH` writes progress and files per level during write workloads, every `--timeseries_interval_ms` (default 1000). Run `strata_bench --help` for every option.
 
-To run the full comparison on a machine, with repeated runs, cache control and a summary, use `bench/run_benchmarks.sh`. [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has the steps.
+To run the full comparison on a machine, with repeated runs, cache control and a summary, use `bench/run_benchmarks.sh`. `bench/run_experiments.sh` runs the experiments, `bench/profile.sh` makes flame graphs, and `bench/plot_experiments.py` draws the charts. [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has the steps.
 
 ### Supported Workloads
 
@@ -138,9 +151,35 @@ Each run prints its options, the commit and LevelDB's optional dependencies. Res
 
 ## Durability
 
-_TODO: the sync=false / sync=true table from the design doc, once the WAL exists._
+`WriteOptions::sync` picks the durability level for each write:
+
+| Failure | `sync=false` (default) | `sync=true` |
+|---|---|---|
+| Process crash, including `kill -9` | Acknowledged writes survive: each record reaches the kernel with `write` before the call returns | Acknowledged writes survive |
+| OS crash or power loss | Recent acknowledged writes may be lost, and the rest are a prefix of history | Acknowledged writes survive: the WAL is `fdatasync`ed before the call returns |
+
+Batches are atomic in both modes, and after any crash the state matches a prefix of the write history. [`docs/DESIGN.md`](docs/DESIGN.md#durability-guarantees) has the full list and what it assumes.
 
 ## Results
 
-_TODO: filled in from [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) in Week 5._
+Run on an Azure `D4ds_v4` with 10M keys, 100-byte values and no compression, as the median of 3 runs. Both engines verify checksums on every block read and use hardware CRC. The read rows run LevelDB with `pread`, the same as StrataDB, because its default `mmap` hits the VM's disk limit under memory pressure.
+
+| Workload | Memory: StrataDB ops/s | Memory: LevelDB ops/s | LevelDB ÷ StrataDB | Disk: StrataDB ops/s | Disk: LevelDB ops/s | LevelDB ÷ StrataDB |
+|---|---|---|---|---|---|---|
+| `readrandom` | 145,822 | 193,805 | 1.33 | 9,410 | 9,412 | 1.00 |
+| `readmissing` | 563,898 | 559,352 | 0.99 | 351,968 | 309,967 | 0.88 |
+| `seekrandom` | 45,785 | 90,505 | 1.98 | 7,271 | 8,269 | 1.14 |
+| `scan` | 15,947 | 33,834 | 2.12 | 3,203 | 3,669 | 1.15 |
+| `ycsbc` | 180,979 | 243,851 | 1.35 | 20,823 | 20,976 | 1.01 |
+| `fillrandom` | 164,362 | 225,638 | 1.37 | | | |
+| `overwrite` | 126,410 | 176,692 | 1.40 | | | |
+| `fillsync` | 4,498 | 4,529 | 1.01 | | | |
+
+Write workloads are compared with default LevelDB and only run with memory to spare. With its default `mmap`, LevelDB's in-memory reads other than `readmissing` are 1.9–3.1x faster than StrataDB's.
+
+Profiling showed a byte-at-a-time CRC taking up to 60% of StrataDB's CPU. Replacing it raised in-memory reads by 49–146%, other than `readmissing`, which rarely needs a checksum, and random writes by 73%:
+
+![StrataDB's throughput change by workload, and how many times faster LevelDB is before and after the CRC fix](docs/images/exp5_crc_fix.png)
+
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has every workload, the five experiments, how to reproduce them, and what still makes LevelDB faster.
 

@@ -1,0 +1,8 @@
+date: 2026-11-07T00:09:23Z
+args: --db-dir=/mnt/strata/exp --output-dir=/home/azureuser/experiments
+commit: d605da2e67a0
+uncommitted files: 8
+read-ahead: 128 KB on sdb
+memory limit for experiment 4: 512M
+runs: 3, experiment 4: 1
+model name	: Intel(R) Xeon(R) Platinum 8272CL CPU @ 2.60GHz

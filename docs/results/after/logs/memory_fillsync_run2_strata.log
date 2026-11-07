@@ -1,0 +1,55 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261106T175102Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillsync
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/data
+CSV Output:      /home/azureuser/results-after/memory.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillsync                1       4511.6      0.50    210.37    436.65     649.07       0  new
+
+--- StrataDB Stats ---
+                               Compactions
+Level  Files   Size(MB)   Count    Read(MB)   Write(MB)
+-------------------------------------------------------
+  0       3       9.39       0        0.00        0.00
+  1       0       0.00       0        0.00        0.00
+  2       0       0.00       0        0.00        0.00
+  3       0       0.00       0        0.00        0.00
+  4       0       0.00       0        0.00        0.00
+  5       0       0.00       0        0.00        0.00
+  6       0       0.00       0        0.00        0.00
+-------------------------------------------------------
+Total files: 3, Total size: 9.39 MB
+Flush count: 3, Compaction count: 0
+Compaction read: 0.00 MB, write: 0.00 MB
+User bytes written: 12.49 MB
+SSTable bytes written: 9.39 MB
+Write amplification: 0.75
+
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/results-after/memory.csv

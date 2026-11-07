@@ -1,0 +1,71 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 69K of event 'cpu-clock'
+# Event count (approx.): 69411411342
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         IPC   [IPC Coverage]
+# ........  .............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    18.92%  [.] leveldb::crc32c::Extend(unsigned int, char const*, unsigned long)
+    12.88%  [k] rep_movs_alternative
+     8.27%  [.] leveldb::Block::Iter::Seek(leveldb::Slice const&)
+     3.56%  [.] __libc_pread
+     3.07%  [k] filemap_get_read_batch
+     3.03%  [k] filemap_read
+     2.67%  [k] xas_load
+     2.12%  [.] leveldb::FilterBlockReader::KeyMayMatch(unsigned long, leveldb::Slice const&)
+     2.06%  [.] leveldb::(anonymous namespace)::BloomFilterPolicy::KeyMayMatch(leveldb::Slice const&, leveldb::Slice const&) const
+     2.05%  [.] leveldb::FindFile(leveldb::InternalKeyComparator const&, std::vector<leveldb::FileMetaData*, std::allocator<leveldb::FileMetaData*> > const&, leveldb::Slice const&)
+     1.84%  [.] leveldb::(anonymous namespace)::ShardedLRUCache::Lookup(leveldb::Slice const&)
+     1.67%  [.] 0x00000000001986a5
+     1.59%  [.] leveldb::InternalKeyComparator::Compare(leveldb::Slice const&, leveldb::Slice const&) const
+     1.37%  [.] leveldb::(anonymous namespace)::ShardedLRUCache::Insert(leveldb::Slice const&, void*, unsigned long, void (*)(leveldb::Slice const&, void*))
+     1.25%  [.] leveldb::Block::Iter::ParseNextKey()
+     1.23%  [.] pthread_mutex_unlock
+     1.21%  [.] leveldb::Block::NewIterator(leveldb::Comparator const*)
+     1.14%  [.] pthread_mutex_lock
+     1.10%  [.] cfree
+     1.08%  [.] leveldb::(anonymous namespace)::BytewiseComparatorImpl::Compare(leveldb::Slice const&, leveldb::Slice const&) const
+     1.07%  [.] malloc
+     1.01%  [.] leveldb::Table::InternalGet(leveldb::ReadOptions const&, leveldb::Slice const&, void*, void (*)(void*, leveldb::Slice const&, leveldb::Slice const&))
+     0.99%  [k] __fget_files
+     0.91%  [k] ext4_file_read_iter
+     0.81%  [.] leveldb::(anonymous namespace)::BloomFilterPolicy::CreateFilter(leveldb::Slice const*, int, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*) const
+     0.74%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_append(char const*, unsigned long)
+     0.70%  [.] 0x00000000001986b7
+     0.60%  [k] do_syscall_64
+     0.57%  [.] 0x00000000000ab0a9
+     0.56%  [.] 0x000000000019869e
+     0.53%  [k] _copy_to_iter
+     0.52%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_replace(unsigned long, unsigned long, char const*, unsigned long)
+     0.51%  [.] leveldb::Table::BlockReader(void*, leveldb::ReadOptions const&, leveldb::Slice const&)
+     0.45%  [.] leveldb::Version::ForEachOverlapping(leveldb::Slice, leveldb::Slice, void*, bool (*)(void*, int, leveldb::FileMetaData*))
+     0.40%  [.] strata::bench::(anonymous namespace)::BenchmarkRunner::GetExistingKeys(unsigned long, unsigned long, strata::bench::(anonymous namespace)::WorkerStats*)
+     0.37%  [.] leveldb::ReadBlock(leveldb::RandomAccessFile*, leveldb::ReadOptions const&, leveldb::BlockHandle const&, leveldb::BlockContents*)
+     0.36%  [.] strata::Histogram::Add(double)
+     0.36%  [.] leveldb::DBImpl::Get(leveldb::ReadOptions const&, leveldb::Slice const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*)
+     0.36%  [.] 0x000000000000084a
+     0.31%  [.] leveldb::Hash(char const*, unsigned long, unsigned int)
+     0.30%  [k] vfs_read
+     0.29%  [.] leveldb::Version::Get(leveldb::ReadOptions const&, leveldb::LookupKey const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*, leveldb::Version::GetStats*)
+     0.28%  [k] folio_mark_accessed
+     0.28%  [.] leveldb::BlockBuilder::Add(leveldb::Slice const&, leveldb::Slice const&)
+     0.27%  [k] aa_file_perm
+     0.26%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_mutate(unsigned long, unsigned long, char const*, unsigned long)
+     0.24%  [.] 0x00000000000ab115
+     0.22%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::Next()
+     0.22%  [.] leveldb::GetVarint64(leveldb::Slice*, unsigned long*)
+     0.22%  [.] leveldb::(anonymous namespace)::LRUCache::Unref(leveldb::(anonymous namespace)::LRUHandle*)
+     0.22%  [k] filemap_get_pages
+     0.21%  [.] leveldb::TableCache::Get(leveldb::ReadOptions const&, unsigned long, unsigned long, leveldb::Slice const&, void*, void (*)(void*, leveldb::Slice const&, leveldb::Slice const&))
+     0.20%  [k] _raw_spin_unlock_irqrestore
+     0.20%  [.] operator new(unsigned long)
+     0.20%  [k] xas_start
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

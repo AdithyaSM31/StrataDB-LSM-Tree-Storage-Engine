@@ -81,6 +81,10 @@ jobs:
         if: matrix.preset == 'release'
         run: bash bench/strata_bench_test.sh
 
+      - name: Experiments test
+        if: matrix.preset == 'release'
+        run: bash bench/run_experiments_test.sh
+
       - name: Benchmark runner test
         if: matrix.preset == 'release'
         run: |

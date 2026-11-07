@@ -229,7 +229,7 @@ ThreadSanitizer runs on every push and has to stay clean.
 
 | What | How |
 |---|---|
-| Each unit | One `*_test.cc` per component, 450 tests labelled `unit` |
+| Each unit | One `*_test.cc` per component, 452 tests labelled `unit` |
 | Logic against a model | `model_test`: randomized operations, reopens, snapshots and `CompactRange` checked against a `std::map`, plus bidirectional iterator fuzzing |
 | Power loss | `FaultInjectionEnv` drops unsynced data. `crash_test` checks synced writes, the prefix property and batch atomicity, and crashes at every file operation of a run with flushes and a compaction |
 | Process death | `kill_test`: 1,000 cycles of fork, write and `SIGKILL`, verifying everything the child confirmed durable |
@@ -237,24 +237,29 @@ ThreadSanitizer runs on every push and has to stay clean.
 | Damaged files | Bit flips and truncation across WAL records and SSTables: each must be detected or harmless, and must never return wrong data |
 | Memory and races | ASan, UBSan and TSan builds in CI |
 
-The release build runs 469 tests in total, with 19 labelled `slow`. CI runs ASan with UBSan, TSan and release builds with GCC and Clang, a `clang-format` check, a benchmark smoke test, and tests of the benchmark harness and runner.
+The release build runs 471 tests in total, with 19 labelled `slow`. CI runs ASan with UBSan, TSan and release builds with GCC and Clang, a `clang-format` check, a benchmark smoke test, and tests of the benchmark harness, runner and experiments script.
 
 ## Trade-offs and what I would change
 
-These are the choices I made, where they differ from LevelDB, and what they cost. Measured figures come from provisional 1M-key runs, and [BENCHMARKS.md](BENCHMARKS.md) has the final numbers.
+These are the choices I made, where they differ from LevelDB, and what they cost. Measured figures come from the 10M-key runs in [BENCHMARKS.md](BENCHMARKS.md), except where I say they're from an earlier 1M-key run.
 
 **Choices I'd keep**
 
-- **One bloom filter per file, checked before the index.** LevelDB builds a filter per 2 KB of file data and searches the index first. Mine gave a similar pass rate on ordinary missing keys (0.76% vs 0.90%), and held up far better on keys one byte away from stored keys in the same block (1.36% vs 18.6%). The cost is that a whole file's filter has to sit in memory.
-- **`pread` rather than `mmap`.** It's simpler, and it behaves predictably when memory is tight. LevelDB with its default `mmap` was about 1.4x faster on warm reads than LevelDB with `pread`. Under a memory limit the same comparison reversed, and it read more than 6x as much from disk, because its mapped pages, including index and filter blocks, can be evicted.
-- **No read-triggered compaction.** Read-only workloads write nothing and the LSM shape stays fixed, which makes behaviour easier to reason about. It does cost read speed: LevelDB made fewer table probes per lookup (1.06 vs 1.40), and its seek compaction is part of the reason.
-- **Syncing every directory entry and reopening every new table.** Both are cheap insurance against silent loss. They add fsyncs and reads to each flush and compaction, and profiling should show whether they matter.
+- **One bloom filter per file, checked before the index.** LevelDB builds a filter per 2 KB of file data and searches the index first. In an earlier 1M-key run, mine gave a similar pass rate on ordinary missing keys (0.76% vs 0.90%), and held up far better on keys one byte away from stored keys in the same block (1.36% vs 18.6%). At 14 bits per key it was 47% faster on missing keys, where LevelDB had stopped improving. The cost is that a whole file's filter has to sit in memory.
+- **`pread` rather than `mmap`.** It's simpler, and it behaves predictably when memory is tight. LevelDB with its default `mmap` was 1.4–1.6x faster on warm reads than LevelDB with `pread`. Under a memory limit it read 2–12x as much per operation and sat at the disk's throughput limit, because page faults pull in read-ahead and its mapped pages, including index and filter blocks, can be evicted.
+- **No read-triggered compaction.** Read-only workloads write nothing and the LSM shape stays fixed, which makes behaviour easier to reason about. It does cost read speed: in the 1M-key run, LevelDB made fewer table probes per lookup (1.06 vs 1.40), and its seek compaction is part of the reason.
+- **Syncing every directory entry and reopening every new table.** Both are cheap insurance against silent loss. They add fsyncs and reads to each flush and compaction. Profiling can't say what they cost, because `cpu-clock` sampling doesn't see time spent waiting.
+
+**What profiling already changed**
+
+- **Software CRC32C was the largest cost.** It was byte-at-a-time and took 59.6% of CPU on `readrandom` and 38.8% on `fillrandom`. It now uses the CPU's CRC32 instruction when available and slicing-by-8 otherwise, with the same values on disk. In-memory `readrandom` went from 59,160 to 145,822 ops/s, and `fillrandom` from 94,916 to 164,362.
 
 **What I would change**
 
-- **Software CRC32C is the largest read cost I've measured so far.** It is byte-at-a-time, and replacing it with hardware CRC in a test build took warm `readrandom` from about 94k to 317k ops/s. Profiling comes next, and it should confirm this before I fix it.
+- **Compaction falls behind more than LevelDB's.** This is now the main write cost. During a 10M `fillrandom`, StrataDB spent 48% of its time in the L0 slowdown and LevelDB 32%, though both wrote the same volume. I haven't established the cause, and the next two items and the iterators are where I would look.
+- **Iterators go through too many virtual calls.** Each `key()` and `Valid()` is forwarded through several layers, and in the `scan` profile that and merging take 24.3% of samples. LevelDB's `IteratorWrapper` caches those results. Seeks and scans are still about 2x slower than LevelDB with `pread`, and caching is the first thing I would try.
 - **The MANIFEST fsync happens under `mutex_`.** While an edit syncs, new reads and writes wait, because both need that lock to start. LevelDB drops its mutex for this write, and I would too.
-- **Flushes always go to L0.** LevelDB can place a memtable's file directly in a deeper level when nothing overlaps. Mine can sit with up to 3 L0 files, which adds probes to reads, and one more flush can then trigger a cascade of compactions.
+- **Flushes always go to L0.** LevelDB can place a memtable's file directly in a deeper level when nothing overlaps. Mine can sit with up to 3 L0 files, which adds probes to reads, and one more flush can then trigger a cascade of compactions. My benchmark datasets settled with 3 L0 files where LevelDB's had none.
 - **One background thread.** A long compaction delays other compactions, although flushes can interrupt it. Separate flush and compaction threads would reduce write stalls.
 - **A failed write requires a reopen.** The sticky error is safe but blunt. A long-running service would need a way to recover without restarting.
 - **No compression.** It keeps the format simple, but data takes more disk and every read block costs more cache. LZ4 is the obvious stretch goal, and the block trailer already has a type byte for it.

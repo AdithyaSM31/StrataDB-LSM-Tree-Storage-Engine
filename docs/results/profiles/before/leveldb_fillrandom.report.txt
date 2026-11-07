@@ -1,0 +1,100 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 64K of event 'cpu-clock'
+# Event count (approx.): 64597597533
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    10.90%  [.] leveldb::crc32c::Extend(unsigned int, char const*, unsigned long)
+     6.23%  [.] leveldb::(anonymous namespace)::BloomFilterPolicy::CreateFilter(leveldb::Slice const*, int, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*) const
+     5.30%  [.] leveldb::SkipList<char const*, leveldb::MemTable::KeyComparator>::FindGreaterOrEqual(char const* const&, leveldb::SkipList<char const*, leveldb::MemTable::KeyComparator>::Node**) const
+     4.53%  [.] write
+     3.13%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_append(char const*, unsigned long)
+     2.30%  [.] leveldb::InternalKeyComparator::Compare(leveldb::Slice const&, leveldb::Slice const&) const
+     2.11%  [.] leveldb::BlockBuilder::Add(leveldb::Slice const&, leveldb::Slice const&)
+     1.77%  [.] leveldb::(anonymous namespace)::BytewiseComparatorImpl::Compare(leveldb::Slice const&, leveldb::Slice const&) const
+     1.77%  [.] leveldb::(anonymous namespace)::MergingIterator::FindSmallest()
+     1.61%  [.] 0x00000000001986a5
+     1.42%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_replace(unsigned long, unsigned long, char const*, unsigned long)
+     1.42%  [k] _raw_spin_unlock_irqrestore
+     1.34%  [.] 0x0000000000198c53
+     1.20%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::Next()
+     1.10%  [.] 0x00000000001986b7
+     1.09%  [.] leveldb::MemTableIterator::key() const
+     1.08%  [k] kernel_init_pages
+     1.02%  [.] leveldb::PutVarint32(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*, unsigned int)
+     0.97%  [.] leveldb::Block::Iter::ParseNextKey()
+     0.95%  [.] leveldb::DBImpl::DoCompactionWork(leveldb::DBImpl::CompactionState*)
+     0.89%  [.] malloc
+     0.86%  [k] get_mem_cgroup_from_mm
+     0.84%  [k] do_syscall_64
+     0.82%  [k] _raw_spin_unlock_irq
+     0.77%  [.] std::thread::_State_impl<std::thread::_Invoker<std::tuple<strata::bench::(anonymous namespace)::RunWorkers<strata::bench::(anonymous namespace)::BenchmarkRunner::RunPuts(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::vector<std::vector<unsigned long, std::allocator<unsigned long> >, std::allocator<std::vector<unsigned long, std::allocator<unsigned long> > > > const&, bool, unsigned long, bool)::{lambda(int, strata::bench::(anonymous namespace)::WorkerStats*)#1}>(std::vector<strata::bench::(anonymous namespace)::WorkerStats, std::allocator<strata::bench::(anonymous namespace)::WorkerStats> >*, strata::bench::(anonymous namespace)::BenchmarkRunner::RunPuts(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::vector<std::vector<unsigned long, std::allocator<unsigned long> >, std::allocator<std::vector<unsigned long, std::allocator<unsigned long> > > > const&, bool, unsigned long, bool)::{lambda(int, strata::bench::(anonymous namespace)::WorkerStats*)#1})::{lambda()#1}> > >::_M_run()
+     0.76%  [.] leveldb::(anonymous namespace)::MergingIterator::Next()
+     0.68%  [.] leveldb::Compaction::ShouldStopBefore(leveldb::Slice const&)
+     0.65%  [k] rep_movs_alternative
+     0.63%  [.] 0x000000000019869e
+     0.61%  [k] balance_dirty_pages_ratelimited_flags
+     0.59%  [.] leveldb::Hash(char const*, unsigned long, unsigned int)
+     0.57%  [.] leveldb::TableBuilder::Add(leveldb::Slice const&, leveldb::Slice const&)
+     0.57%  [.] pthread_mutex_lock
+     0.52%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::SkipEmptyDataBlocksForward()
+     0.52%  [.] pthread_mutex_unlock
+     0.51%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::value() const
+     0.50%  [k] copy_folio_from_iter_atomic
+     0.50%  [k] ext4_da_write_begin
+     0.48%  [k] memset_orig
+     0.48%  [.] 0x000000000000084a
+     0.46%  [k] ext4_da_write_end
+     0.46%  [.] cfree
+     0.45%  [.] void std::shuffle<__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, std::mersenne_twister_engine<unsigned long, 64ul, 312ul, 156ul, 31ul, 13043109905998158313ul, 29ul, 6148914691236517205ul, 17ul, 8202884508482404352ul, 37ul, 18444473444759240704ul, 43ul, 6364136223846793005ul>&>(__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, __gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, std::mersenne_twister_engine<unsigned long, 64ul, 312ul, 156ul, 31ul, 13043109905998158313ul, 29ul, 6148914691236517205ul, 17ul, 8202884508482404352ul, 37ul, 18444473444759240704ul, 43ul, 6364136223846793005ul>&)
+     0.44%  [.] leveldb::ReadBlock(leveldb::RandomAccessFile*, leveldb::ReadOptions const&, leveldb::BlockHandle const&, leveldb::BlockContents*)
+     0.41%  [k] try_charge_memcg
+     0.41%  [k] vfs_write
+     0.40%  [.] leveldb::FilterBlockBuilder::AddKey(leveldb::Slice const&)
+     0.40%  [k] __radix_tree_lookup
+     0.39%  [.] strata::Histogram::Add(double)
+     0.38%  [k] __fget_files
+     0.36%  [.] 0x0000000000198cd9
+     0.36%  [k] ext4_block_write_begin
+     0.36%  [k] finish_task_switch.isra.0
+     0.36%  [k] ext4_file_write_iter
+     0.35%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_mutate(unsigned long, unsigned long, char const*, unsigned long)
+     0.35%  [k] ext4_da_do_write_end.isra.0
+     0.34%  [k] mark_buffer_dirty
+     0.33%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_append(char const*, unsigned long)@plt
+     0.33%  [k] __filemap_get_folio_mpol
+     0.33%  [k] xas_load
+     0.33%  [k] xas_start
+     0.32%  [k] block_commit_write
+     0.32%  [.] leveldb::DBImpl::Write(leveldb::WriteOptions const&, leveldb::WriteBatch*)
+     0.31%  [k] filemap_add_folio
+     0.31%  [k] generic_perform_write
+     0.31%  [.] leveldb::EncodeVarint32(char*, unsigned int)
+     0.31%  [k] filemap_get_entry
+     0.29%  [.] 0x0000000000198d1d
+     0.29%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::resize(unsigned long, char)
+     0.29%  [k] memcg1_commit_charge
+     0.26%  [.] 0x00000000001986b3
+     0.25%  [.] 0x00000000001986bd
+     0.25%  [k] _raw_spin_lock
+     0.25%  [.] 0x0000000000198680
+     0.25%  [.] 0x0000000000198c40
+     0.24%  [.] 0x0000000000198cba
+     0.23%  [k] ext4_nonda_switch
+     0.21%  [.] leveldb::(anonymous namespace)::MergingIterator::value() const
+     0.21%  [.] 0x0000000000198c80
+     0.21%  [.] leveldb::SkipList<char const*, leveldb::MemTable::KeyComparator>::Insert(char const* const&)
+     0.20%  [k] __raw_callee_save___pv_queued_spin_unlock
+     0.20%  [k] __rmqueue_pcplist
+     0.20%  [k] down_write
+     0.20%  [k] folio_unlock
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
