@@ -11,7 +11,18 @@ namespace strata::crc32c {
 // generated `init_crc`.
 //
 // In particular: Extend(Value(A), B) == Value(A + B).
+//
+// Uses the CPU's CRC instruction if it has one, and software otherwise. Both give
+// the same result, so files written with one can be read with the other.
 uint32_t Extend(uint32_t init_crc, const char* data, size_t n);
+
+// Exposed so tests can check that the two implementations agree.
+namespace internal {
+uint32_t ExtendSoftware(uint32_t init_crc, const char* data, size_t n);
+bool HardwareAvailable();
+// Only call this if HardwareAvailable() returned true.
+uint32_t ExtendHardware(uint32_t init_crc, const char* data, size_t n);
+}  // namespace internal
 
 // Return the CRC32C of `s` appended to the byte sequence that generated `init_crc`.
 inline uint32_t Extend(uint32_t init_crc, std::string_view s) {

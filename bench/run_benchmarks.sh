@@ -31,6 +31,7 @@ OUTPUT_DIR="${REPO_ROOT}/bench/results"
 FIO_SECONDS=30
 READ_AHEAD_KB=128
 WORKLOAD_TIMEOUT=10800
+DISK_ENGINES=strata,leveldb,leveldb-nommap
 SKIP_BUILD=0
 SKIP_FIO=0
 SKIP_SNAPSHOT=0
@@ -53,7 +54,9 @@ Usage: $(basename "$0") --db-dir=DIR [options]
   --output-dir=DIR    CSVs, logs and summary [default: bench/results]
   --read-ahead-kb=N   Read-ahead on the database's disk during the run [default: 128]
   --workload-timeout=SEC  Fail if one workload takes longer than this [default: 10800]
-  --skip-build       Use the existing build/bench/strata_bench
+  --disk-engines=LIST Comma-separated engines for the disk tier, from strata, leveldb and
+                      leveldb-nommap [default: all three]
+  --skip-build      Use the existing build/bench/strata_bench
   --skip-fio          Skip the raw disk baseline
   --skip-snapshot     Reuse the snapshots already in --db-dir
   --dry-run           1M keys, 1,000 sync writes and a short fio run, unless set otherwise
@@ -94,6 +97,7 @@ for arg in "$@"; do
     --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
     --read-ahead-kb=*) READ_AHEAD_KB="${arg#*=}" ;;
     --workload-timeout=*) WORKLOAD_TIMEOUT="${arg#*=}" ;;
+    --disk-engines=*) DISK_ENGINES="${arg#*=}" ;;
     --skip-build) SKIP_BUILD=1 ;;
     --skip-fio) SKIP_FIO=1 ;;
     --skip-snapshot) SKIP_SNAPSHOT=1 ;;
@@ -108,6 +112,13 @@ case "$TIER" in
   all | memory | disk) ;;
   *) die "--tier must be all, memory or disk, not $TIER" ;;
 esac
+for eng in ${DISK_ENGINES//,/ }; do
+  case "$eng" in
+    strata | leveldb | leveldb-nommap) ;;
+    *) die "--disk-engines has an unknown engine: $eng" ;;
+  esac
+done
+[ -n "${DISK_ENGINES//,/}" ] || die "--disk-engines is empty"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   [ "$NUM_SET" -eq 1 ] || NUM=1000000
@@ -344,11 +355,16 @@ DISK_WORKLOADS=(readrandom readmissing seekrandom scan ycsbc)
 
 # Workloads that only read also run LevelDB with mmap off. Engine order alternates between runs.
 engines_for() {
-  local workload="$1" run="$2"
-  local -a engines=(strata leveldb)
+  local tier="$1" workload="$2" run="$3" eng
+  local -a candidates=(strata leveldb) engines=()
   case "$workload" in
-    readrandom | readmissing | seekrandom | scan | ycsbc) engines+=(leveldb-nommap) ;;
+    readrandom | readmissing | seekrandom | scan | ycsbc) candidates+=(leveldb-nommap) ;;
   esac
+  for eng in "${candidates[@]}"; do
+    if [ "$tier" != disk ] || [[ ",${DISK_ENGINES}," == *",${eng},"* ]]; then
+      engines+=("$eng")
+    fi
+  done
   if [ $((run % 2)) -eq 0 ]; then
     local i
     for ((i = ${#engines[@]} - 1; i >= 0; i--)); do echo "${engines[i]}"; done
@@ -365,7 +381,7 @@ run_tier() {
   for ((run = 1; run <= RUNS; run++)); do
     echo "--- $tier tier, run $run of $RUNS"
     for workload in "$@"; do
-      for eng in $(engines_for "$workload" "$run"); do
+      for eng in $(engines_for "$tier" "$workload" "$run"); do
         run_workload "$tier" "$run" "$eng" "$workload" "$csv"
       done
     done
