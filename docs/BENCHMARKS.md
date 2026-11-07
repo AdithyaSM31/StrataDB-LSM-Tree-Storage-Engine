@@ -23,6 +23,8 @@ Each run also saves its own `environment.txt` with the results. This series can 
 
 Both runs used a source tree that hadn't been committed yet, so the `commit` column in the CSVs and `environment.txt` shows the parent: `2cdc2eb` for the before run and `d605da2` for the after run. Each run's `source_tree.txt` records the tree it measured. The before run's `8b18cbe` is the tree of `d3ea10a`. The after run's `d6e79b6` is the tree of `ff46108` plus a stray `bench/__pycache__` file that has no effect on the build.
 
+The commits named on this page are on the [`week5-benchmarks`](https://github.com/AdithyaSM31/StrataDB-LSM-Tree-Storage-Engine/commits/week5-benchmarks) branch, which was squashed into `main` as `382e0ec`. The engine and benchmark code in `382e0ec` is the same as in `ff46108`.
+
 ## How to reproduce
 
 Use Ubuntu 24.04, because the build needs CMake 3.25 or newer.
