@@ -68,7 +68,9 @@ constexpr std::string_view kCsvHeader =
     "p999_us,avg_us,min_us,max_us,entries,value_size,write_buffer_size,block_size,block_cache_size,"
     "bloom_bits,max_open_files,dataset,levels_at_start,writer_ops,writer_ops_per_sec,"
     "zipf_theta,read_ops,update_ops,read_p50_us,read_p99_us,read_p999_us,update_p50_us,"
-    "update_p99_us,update_p999_us";
+    "update_p99_us,update_p999_us,group_commit,cache_hits,cache_misses";
+constexpr std::string_view kTimeseriesHeader =
+    "run_id,engine,workload,threads,elapsed_sec,ops_done,ops_per_sec,l0_files,level_files";
 
 struct BenchConfig {
   std::string engine = "both";
@@ -86,6 +88,10 @@ struct BenchConfig {
   uint64_t write_rate = 10000;  // readwhilewriting writes per second; 0 means unthrottled
   size_t ycsb_ops = 0;          // 0 means: use num (overridden per-run if set)
   double zipf_theta = 0.99;     // Zipfian skew parameter; must be in (0, 1)
+  bool leveldb_mmap = true;     // LevelDB's default; false makes it read with pread
+  bool group_commit = true;     // StrataDB only; false gives every write its own sync
+  std::string timeseries_path;  // empty means no time series
+  uint64_t timeseries_interval_ms = 1000;
   bool stats = false;
   std::string csv_path = "bench/results/benchmarks.csv";
   std::string run_id;
@@ -120,6 +126,9 @@ struct BenchmarkResult {
   double update_p50_us = 0.0;
   double update_p99_us = 0.0;
   double update_p999_us = 0.0;
+  // Block cache lookups during the workload, not counting setup.
+  uint64_t cache_hits = 0;
+  uint64_t cache_misses = 0;
 };
 
 // One per thread, each on its own cache lines: latency recording writes to these
@@ -129,6 +138,7 @@ struct alignas(kCacheLineSize) WorkerStats {
   Histogram read_latency;  // YCSB reads
   uint64_t errors = 0;
   uint64_t bytes = 0;
+  std::atomic<uint64_t> ops_done{0};  // only its worker writes it; the sampler reads it
 };
 
 std::string FormatKey(uint64_t k) {
@@ -139,15 +149,18 @@ std::string FormatKey(uint64_t k) {
 
 // A key that can never exist but still falls inside the stored key range, so
 // lookups have to consult files and their bloom filters instead of being ruled
-// out by the files' key ranges. '.' sorts just before '0', which places
-// "...12." between "...119" and "...120".
+// out by the files' key ranges. Stored keys are 16 digits, so "<k>." sorts
+// between k and k + 1.
+//
+// Don't make these keys differ from stored ones in only the last byte. Replacing
+// the last digit with '.' gave a key one byte away from ten stored keys in the
+// same block. LevelDB's per-block filters let 18.6% of those through, and only
+// 0.90% of these, which turned a 1.5x difference between the engines into 34x.
 std::string FormatMissingKey(uint64_t k, uint64_t num_entries) {
-  if (k < 10 && num_entries > 10) {
-    k += 10;  // keys 0-9 would otherwise sort before the smallest stored key
+  if (k + 1 >= num_entries && k > 0) {
+    --k;  // the gap after the largest stored key is outside the key range
   }
-  std::string key = FormatKey(k);
-  key.back() = '.';
-  return key;
+  return FormatKey(k) + ".";
 }
 
 class ValueGenerator {
@@ -291,6 +304,8 @@ void PrintConfig(const BenchConfig& cfg) {
   std::cout << "Compression:     none on both engines\n"
             << "Checksums:       every block read verified on both engines\n"
             << "LevelDB Build:   " << STRATA_BENCH_LEVELDB_FEATURES << "\n"
+            << "LevelDB Reads:   " << (cfg.leveldb_mmap ? "mmap" : "pread") << "\n"
+            << "Group Commit:    " << (cfg.group_commit ? "on" : "off") << "\n"
             << "YCSB Ops:        " << (cfg.ycsb_ops > 0 ? cfg.ycsb_ops : cfg.num)
             << " (per workload)\n"
             << "Zipf Theta:      " << cfg.zipf_theta << "\n"
@@ -333,11 +348,17 @@ void PrintTableRow(const BenchmarkResult& r) {
                   r.read_ops, r.read_p50_us, r.read_p99_us, r.read_p999_us);
     }
   }
+  const uint64_t lookups = r.cache_hits + r.cache_misses;
+  if (lookups > 0) {
+    std::printf("%-10s   block cache: %" PRIu64 " hits, %" PRIu64 " misses, %.1f%% hit rate\n", "",
+                r.cache_hits, r.cache_misses,
+                100.0 * static_cast<double>(r.cache_hits) / static_cast<double>(lookups));
+  }
   std::fflush(stdout);
 }
 
 // Checked before any workload runs, so a bad path can't lose a long run's results.
-bool PrepareCsv(const std::string& csv_path) {
+bool PrepareCsv(const std::string& csv_path, std::string_view header = kCsvHeader) {
   const std::filesystem::path path(csv_path);
   std::error_code ec;
   if (path.has_parent_path()) {
@@ -350,7 +371,7 @@ bool PrepareCsv(const std::string& csv_path) {
   {
     std::ifstream existing(csv_path);
     std::string first_line;
-    if (existing.is_open() && std::getline(existing, first_line) && first_line != kCsvHeader) {
+    if (existing.is_open() && std::getline(existing, first_line) && first_line != header) {
       std::cerr << "CSV file " << csv_path
                 << " has different columns. Move it aside or pass another --csv.\n";
       return false;
@@ -360,7 +381,7 @@ bool PrepareCsv(const std::string& csv_path) {
     }
   }
   std::ofstream csv(csv_path, std::ios::app);
-  csv << kCsvHeader << "\n";
+  csv << header << "\n";
   if (!csv.good()) {
     std::cerr << "Cannot write CSV file: " << csv_path << "\n";
     return false;
@@ -402,7 +423,7 @@ bool AppendCsv(const BenchConfig& cfg, const BenchmarkResult& r) {
   } else {
     row << ",,,,,,,,";
   }
-  row << '\n';
+  row << ',' << (cfg.group_commit ? 1 : 0) << ',' << r.cache_hits << ',' << r.cache_misses << '\n';
 
   std::ofstream csv(cfg.csv_path, std::ios::app);
   csv << row.str();
@@ -413,6 +434,99 @@ bool AppendCsv(const BenchConfig& cfg, const BenchmarkResult& r) {
   }
   return true;
 }
+
+// Records progress and the LSM's shape at a fixed interval while workers write.
+// Rows stay in memory until the end, so sampling adds no file I/O during the run.
+class TimeseriesSampler {
+ public:
+  TimeseriesSampler(const BenchConfig& cfg, BenchmarkAdapter* adapter, std::string engine,
+                    std::string workload, const std::vector<WorkerStats>* stats)
+      : cfg_(cfg),
+        adapter_(adapter),
+        engine_(std::move(engine)),
+        workload_(std::move(workload)),
+        stats_(stats),
+        start_(std::chrono::steady_clock::now()),
+        last_time_(start_),
+        thread_([this]() { Run(); }) {}
+
+  TimeseriesSampler(const TimeseriesSampler&) = delete;
+  TimeseriesSampler& operator=(const TimeseriesSampler&) = delete;
+
+  // Takes a last sample, so the final row shows every operation, and writes the
+  // rows. Returns false if a sample or the write failed.
+  bool Finish() {
+    stop_.store(true, std::memory_order_relaxed);
+    thread_.join();
+    Sample();
+
+    std::ofstream csv(cfg_.timeseries_path, std::ios::app);
+    csv << rows_.str();
+    csv.flush();
+    if (!csv.good()) {
+      std::cerr << "Failed to write " << cfg_.timeseries_path << "\n";
+      return false;
+    }
+    return !failed_;
+  }
+
+ private:
+  // Sleeps in short steps, so Finish() never waits long for this thread to end.
+  void Run() {
+    const auto interval = std::chrono::milliseconds(cfg_.timeseries_interval_ms);
+    auto next_sample = start_ + interval;
+    while (!stop_.load(std::memory_order_relaxed)) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_sample) {
+        Sample();
+        next_sample += interval;
+      } else {
+        std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(
+            next_sample - now, std::chrono::milliseconds(10)));
+      }
+    }
+  }
+
+  void Sample() {
+    std::vector<LevelShape> shapes;
+    const Status s = adapter_->LevelShapes(&shapes);
+    if (!s.ok() || shapes.empty()) {
+      if (!failed_) {
+        std::cerr << engine_ << ": cannot sample level sizes: " << s.ToString() << "\n";
+      }
+      failed_ = true;
+      return;
+    }
+    uint64_t ops = 0;
+    for (const WorkerStats& w : *stats_) {
+      ops += w.ops_done.load(std::memory_order_relaxed);
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const double interval = std::chrono::duration<double>(now - last_time_).count();
+    const double rate = interval > 0.0 ? static_cast<double>(ops - last_ops_) / interval : 0.0;
+    char numbers[64];
+    std::snprintf(numbers, sizeof(numbers), "%.3f,%" PRIu64 ",%.1f,",
+                  std::chrono::duration<double>(now - start_).count(), ops, rate);
+    rows_ << cfg_.run_id << ',' << engine_ << ',' << workload_ << ',' << cfg_.threads << ','
+          << numbers << shapes[0].files << ',' << FormatFileCounts(shapes) << '\n';
+    last_time_ = now;
+    last_ops_ = ops;
+  }
+
+  const BenchConfig& cfg_;
+  BenchmarkAdapter* const adapter_;
+  const std::string engine_;
+  const std::string workload_;
+  const std::vector<WorkerStats>* const stats_;
+  const std::chrono::steady_clock::time_point start_;
+  std::atomic<bool> stop_{false};
+  // Used by the sampling thread, then by Finish() once that thread has ended.
+  std::chrono::steady_clock::time_point last_time_;
+  uint64_t last_ops_ = 0;
+  std::ostringstream rows_;
+  bool failed_ = false;
+  std::thread thread_;  // last, so everything it uses exists before it starts
+};
 
 class BenchmarkRunner {
  public:
@@ -436,6 +550,7 @@ class BenchmarkRunner {
         ++failures;
         break;
       }
+      RecordCacheStats(&*result);
       PrintTableRow(*result);
       // Numbers from a run with errors don't describe the engine, so they aren't kept.
       if (result->errors > 0) {
@@ -450,10 +565,34 @@ class BenchmarkRunner {
       }
     }
     adapter_->Close();
-    return failures;
+    return failures + side_failures_;
   }
 
  private:
+  // Counters start at zero when a database opens. Setup, such as settling
+  // compactions, is left out by reading them again just before the workload.
+  void MarkCacheStatsStart() {
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    if (adapter_->BlockCacheStats(&hits, &misses).ok()) {
+      cache_hits_at_start_ = hits;
+      cache_misses_at_start_ = misses;
+    }
+  }
+
+  void RecordCacheStats(BenchmarkResult* r) {
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    const Status s = adapter_->BlockCacheStats(&hits, &misses);
+    if (!s.ok()) {
+      std::cerr << engine_name_ << ": cannot read block cache counters: " << s.ToString() << "\n";
+      ++side_failures_;
+      return;
+    }
+    r->cache_hits = hits - cache_hits_at_start_;
+    r->cache_misses = misses - cache_misses_at_start_;
+  }
+
   static bool IsWriteWorkload(const std::string& workload) {
     return workload == "fillseq" || workload == "fillrandom" || workload == "overwrite" ||
            workload == "fillsync" || workload == "readwhilewriting" || workload == "ycsba" ||
@@ -479,6 +618,7 @@ class BenchmarkRunner {
     opts.block_cache_size = cfg_.block_cache_size;
     opts.bloom_filter_bits = cfg_.bloom_filter_bits;
     opts.max_open_files = cfg_.max_open_files;
+    opts.group_commit = cfg_.group_commit;
     return opts;
   }
 
@@ -580,8 +720,10 @@ class BenchmarkRunner {
       if (!OpenFreshDatabase()) {
         return false;
       }
+      // Building a dataset is setup, so it never adds to a time series.
       const BenchmarkResult fill =
-          RunPuts("fillrandom", MakeKeys(cfg_.num, cfg_.threads, kDefaultSeed), false, 0);
+          RunPuts("fillrandom", MakeKeys(cfg_.num, cfg_.threads, kDefaultSeed), false, 0,
+                  /*may_sample=*/false);
       if (fill.errors > 0) {
         std::cerr << engine_name_ << ": building the dataset failed with " << fill.errors
                   << " errors\n";
@@ -610,6 +752,8 @@ class BenchmarkRunner {
 
   std::optional<BenchmarkResult> RunSingleWorkload(const std::string& workload) {
     BenchmarkResult start;
+    cache_hits_at_start_ = 0;  // right for a fill: its database has only just opened
+    cache_misses_at_start_ = 0;
 
     if (workload == "fillseq" || workload == "fillrandom") {
       if (!OpenFreshDatabase()) {
@@ -636,6 +780,7 @@ class BenchmarkRunner {
     if (!PrepareDataset(&start)) {
       return std::nullopt;
     }
+    MarkCacheStatsStart();
 
     BenchmarkResult r;
     if (workload == "overwrite") {
@@ -696,11 +841,15 @@ class BenchmarkRunner {
 
   BenchmarkResult RunPuts(const std::string& workload,
                           const std::vector<std::vector<uint64_t>>& keys, bool sync,
-                          uint64_t value_salt) {
+                          uint64_t value_salt, bool may_sample = true) {
     std::vector<WorkerStats> stats(keys.size());
     uint64_t ops = 0;
     for (const auto& slice : keys) {
       ops += slice.size();
+    }
+    std::optional<TimeseriesSampler> sampler;
+    if (may_sample && !cfg_.timeseries_path.empty()) {
+      sampler.emplace(cfg_, adapter_.get(), engine_name_, workload, &stats);
     }
     const double elapsed = RunWorkers(&stats, [&](int t, WorkerStats* w) {
       for (uint64_t k : keys[static_cast<size_t>(t)]) {
@@ -713,8 +862,13 @@ class BenchmarkRunner {
         } else {
           CountError(w, "put", key, s.ToString());
         }
+        w->ops_done.store(w->ops_done.load(std::memory_order_relaxed) + 1,
+                          std::memory_order_relaxed);
       }
     });
+    if (sampler.has_value() && !sampler->Finish()) {
+      ++side_failures_;
+    }
     return BuildResult(workload, ops, elapsed, stats);
   }
 
@@ -1087,6 +1241,9 @@ class BenchmarkRunner {
   std::string engine_db_dir_;
   std::string dataset_marker_;
   std::atomic<uint64_t> printed_errors_{0};
+  uint64_t cache_hits_at_start_ = 0;
+  uint64_t cache_misses_at_start_ = 0;
+  int side_failures_ = 0;  // a time series or cache counter that couldn't be recorded
 };
 
 // Parses all of `text`: digits, then an optional k/m/g suffix worth `scale` to that
@@ -1171,6 +1328,13 @@ void PrintUsage() {
          "(default: bench/results/benchmarks.csv)\n"
       << "  --ycsb_ops=N                     Operations for YCSB workloads (default: num)\n"
       << "  --zipf_theta=F                   Zipfian skew in (0,1); 0.99 is YCSB default\n"
+      << "  --leveldb_mmap=0|1               0 makes LevelDB read with pread, and reports it as\n"
+      << "                                   LevelDB-nommap (default: 1)\n"
+      << "  --group_commit=0|1               0 gives every StrataDB write its own WAL record and\n"
+      << "                                   sync; needs --engine=strata (default: 1)\n"
+      << "  --timeseries=PATH                CSV of progress and files per level during fillseq,\n"
+      << "                                   fillrandom, overwrite and fillsync\n"
+      << "  --timeseries_interval_ms=N       Time between samples (default: 1000)\n"
       << "\n"
       << "Workloads: fillseq fillrandom overwrite fillsync readseq readrandom readmissing\n"
       << "           seekrandom scan ycsbc ycsbb ycsba readwhilewriting\n"
@@ -1258,6 +1422,24 @@ std::optional<int> ParseArgs(int argc, char* argv[], BenchConfig* cfg) {
       } else {
         cfg->zipf_theta = parsed_theta;
       }
+    } else if (value_of("--leveldb_mmap=", &value)) {
+      if (value != "0" && value != "1") {
+        std::cerr << "Invalid value: " << arg << " (must be 0 or 1)\n";
+        ok = false;
+      } else {
+        cfg->leveldb_mmap = value == "1";
+      }
+    } else if (value_of("--group_commit=", &value)) {
+      if (value != "0" && value != "1") {
+        std::cerr << "Invalid value: " << arg << " (must be 0 or 1)\n";
+        ok = false;
+      } else {
+        cfg->group_commit = value == "1";
+      }
+    } else if (value_of("--timeseries=", &value)) {
+      cfg->timeseries_path = value;
+    } else if (value_of("--timeseries_interval_ms=", &value)) {
+      ok = parse_number(value, kCount, 1, 3600000, &cfg->timeseries_interval_ms);
     } else if (value_of("--csv=", &value)) {
       cfg->csv_path = value;
     } else if (arg == "--stats" || arg == "--stats=1" || arg == "--stats=true") {
@@ -1313,7 +1495,25 @@ int RunMain(int argc, char* argv[]) {
     }
   }
 
+  if (!cfg.group_commit && engines != std::vector<std::string>{"strata"}) {
+    std::cerr << "--group_commit=0 needs --engine=strata: LevelDB has no way to turn it off\n";
+    return kExitUsage;
+  }
+  if (!cfg.timeseries_path.empty()) {
+    const auto samples = [](const std::string& workload) {
+      return workload == "fillseq" || workload == "fillrandom" || workload == "overwrite" ||
+             workload == "fillsync";
+    };
+    if (std::none_of(workloads.begin(), workloads.end(), samples)) {
+      std::cerr << "--timeseries needs one of fillseq, fillrandom, overwrite or fillsync\n";
+      return kExitUsage;
+    }
+  }
+
   if (!PrepareCsv(cfg.csv_path)) {
+    return kExitFailure;
+  }
+  if (!cfg.timeseries_path.empty() && !PrepareCsv(cfg.timeseries_path, kTimeseriesHeader)) {
     return kExitFailure;
   }
 
@@ -1322,8 +1522,8 @@ int RunMain(int argc, char* argv[]) {
 
   int failures = 0;
   for (const std::string& engine : engines) {
-    BenchmarkRunner runner(cfg,
-                           engine == "strata" ? CreateStrataAdapter() : CreateLevelDBAdapter());
+    BenchmarkRunner runner(
+        cfg, engine == "strata" ? CreateStrataAdapter() : CreateLevelDBAdapter(cfg.leveldb_mmap));
     failures += runner.RunWorkloads(workloads);
   }
 

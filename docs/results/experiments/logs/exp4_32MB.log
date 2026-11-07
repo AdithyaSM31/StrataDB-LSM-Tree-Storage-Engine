@@ -1,0 +1,72 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T014233Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      readrandom
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     33554432 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp4_block_cache.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   readrandom              1       9017.0      1.00    127.28    299.80     493.94       0  fillrandom
+             block cache: 352688 hits, 10050515 misses, 3.4% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp4_block_cache.csv
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T020112Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      readrandom
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     33554432 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp4_block_cache.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap readrandom              1       9166.9      1.01    124.40    282.69     447.00       0  fillrandom
+             block cache: 303290 hits, 10019015 misses, 2.9% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp4_block_cache.csv

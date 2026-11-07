@@ -404,8 +404,64 @@ TEST(Crc32cTest, RawCrcSelfAppendIsConstantWhileMaskedVaries) {
   EXPECT_EQ(masked_results.size(), test_strings.size());
 }
 
+// The definition of CRC32C, one bit at a time, to check the faster versions against.
+uint32_t ExtendBitwise(uint32_t init_crc, const char* data, size_t n) {
+  uint32_t crc = init_crc ^ 0xFFFFFFFFU;
+  for (size_t i = 0; i < n; ++i) {
+    crc ^= static_cast<uint8_t>(data[i]);
+    for (int bit = 0; bit < 8; ++bit) {
+      crc = (crc & 1U) != 0 ? (crc >> 1) ^ 0x82F63B78U : crc >> 1;
+    }
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
+TEST(Crc32cTest, AllImplementationsMatchTheDefinition) {
+  std::mt19937 rng(7);
+  std::string data(5000, '\0');
+  for (char& b : data) {
+    b = static_cast<char>(rng() & 0xFF);
+  }
+
+  const bool hardware = internal::HardwareAvailable();
+  std::vector<size_t> lengths;
+  for (size_t n = 0; n <= 80; ++n) {
+    lengths.push_back(n);
+  }
+  lengths.insert(lengths.end(), {127, 128, 129, 255, 256, 4095, 4096, 4097, 4900});
+
+  // Unaligned starts matter, because the fast paths read 8 bytes at a time.
+  for (size_t offset = 0; offset < 16; ++offset) {
+    for (size_t n : lengths) {
+      for (uint32_t init : {0U, 1U, 0xFFFFFFFFU, 0x8A9136AAU}) {
+        const char* p = data.data() + offset;
+        const uint32_t expected = ExtendBitwise(init, p, n);
+        EXPECT_EQ(internal::ExtendSoftware(init, p, n), expected)
+            << "offset " << offset << ", length " << n;
+        EXPECT_EQ(Extend(init, p, n), expected) << "offset " << offset << ", length " << n;
+        if (hardware) {
+          EXPECT_EQ(internal::ExtendHardware(init, p, n), expected)
+              << "offset " << offset << ", length " << n;
+        }
+      }
+    }
+  }
+}
+
+TEST(Crc32cTest, SoftwareAndHardwareMatchRfc3720) {
+  const std::string zeros(32, '\0');
+  const std::string digits = "123456789";
+  EXPECT_EQ(internal::ExtendSoftware(0, zeros.data(), zeros.size()), 0x8A9136AAU);
+  EXPECT_EQ(internal::ExtendSoftware(0, digits.data(), digits.size()), 0xE3069283U);
+  if (!internal::HardwareAvailable()) {
+    GTEST_SKIP() << "This CPU has no CRC32C instruction";
+  }
+  EXPECT_EQ(internal::ExtendHardware(0, zeros.data(), zeros.size()), 0x8A9136AAU);
+  EXPECT_EQ(internal::ExtendHardware(0, digits.data(), digits.size()), 0xE3069283U);
+}
+
 TEST(Crc32cTest, SpeedBenchmark) {
-  // Benchmark byte-at-a-time table throughput over a 1 MB buffer.
+  // Measure throughput over a 1 MB buffer, using whichever version this CPU selects.
   constexpr size_t kBufferSize = size_t{1024} * 1024;  // 1 MB
   constexpr int kIterations = 64;                      // 64 MB total
   std::string buffer(kBufferSize, 'x');

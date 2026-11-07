@@ -1,0 +1,44 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261106T171923Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillseq
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/data
+CSV Output:      /home/azureuser/results-after/memory.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB    fillseq                 1     461435.3     51.05      1.44      4.20      12.08       0  new
+
+--- LevelDB Stats ---
+                               Compactions
+Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+--------------------------------------------------
+  2       31       97         6        0      1110
+  3      319     1000         0        0         0
+  4        4       13         0        0         0
+
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/results-after/memory.csv

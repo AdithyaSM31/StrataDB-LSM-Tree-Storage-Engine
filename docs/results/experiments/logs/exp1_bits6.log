@@ -1,0 +1,216 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003200Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      readmissing
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   readmissing             1     570815.0      9.25      1.03      7.60      15.34       0  fillrandom
+             block cache: 70890 hits, 1058407 misses, 6.3% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003223Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      readmissing
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   readmissing             1     575127.5      9.32      1.02      7.51      15.95       0  fillrandom
+             block cache: 70890 hits, 1058407 misses, 6.3% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003246Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      readmissing
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   readmissing             1     577681.2      9.37      1.02      7.44      15.86       0  fillrandom
+             block cache: 70890 hits, 1058407 misses, 6.3% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003358Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      readmissing
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap readmissing             1     516115.1      8.37      1.45      6.56      14.09       0  fillrandom
+             block cache: 17914 hits, 808158 misses, 2.2% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003423Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      readmissing
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap readmissing             1     502420.2      8.15      1.49      6.74      16.77       0  fillrandom
+             block cache: 19768 hits, 805684 misses, 2.4% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003448Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      readmissing
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /home/azureuser/experiments/exp1_bloom.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap readmissing             1     510583.5      8.28      1.47      6.66      15.69       0  fillrandom
+             block cache: 18960 hits, 806882 misses, 2.3% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/experiments/exp1_bloom.csv

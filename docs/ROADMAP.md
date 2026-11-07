@@ -67,11 +67,11 @@ Tick items off as they land; each one should arrive with its tests.
 
 - [x] `strata_bench` with StrataDB and LevelDB adapters and all workloads
 - [x] YCSB A/B/C with Zipfian keys
-- [ ] Run on an EC2 instance with local NVMe; record hardware and flags
-- [ ] Profile with `perf` and flame graphs, fix the top hotspot, re-measure
-- [ ] Charts for the five experiments
-- [ ] DESIGN.md: formats, compaction rules, durability table, trade-offs you chose
-- [ ] README: one diagram, a results table, how to build and run tests
+- [x] Run on an Azure `D4ds_v4` with local SSD; record hardware and flags
+- [x] Profile with `perf` and flame graphs, fix the top hotspot, re-measure
+- [x] Charts for the five experiments
+- [x] DESIGN.md: formats, compaction rules, durability table, trade-offs you chose
+- [x] README: one diagram, a results table, how to build and run tests
 
 ## Buffer (7–13 Dec)
 

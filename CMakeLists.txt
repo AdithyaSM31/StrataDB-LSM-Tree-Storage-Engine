@@ -137,10 +137,11 @@ if(STRATA_BUILD_BENCH)
     Threads::Threads)
   strata_configure_target(strata_bench)
 
-  # LevelDB is built with -fno-rtti, so UBSan's vptr check can't link against it.
+  # LevelDB is built with -fno-rtti. This file derives from its Env classes, so it
+  # needs the same flag, and UBSan's vptr check can't link against it.
   set_source_files_properties("${PROJECT_SOURCE_DIR}/bench/adapters/leveldb.cc"
     TARGET_DIRECTORY strata_bench
-    PROPERTIES COMPILE_OPTIONS "-fno-sanitize=vptr")
+    PROPERTIES COMPILE_OPTIONS "-fno-rtti;-fno-sanitize=vptr")
 
   # Every run records the commit it measures and what LevelDB was built with: an
   # installed crc32c library, for one, gives LevelDB hardware checksums. Committing

@@ -1,0 +1,57 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 106K of event 'cpu-clock'
+# Event count (approx.): 106414414308
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                IPC   [IPC Coverage]
+# ........  ....................................................................................................................................................................................................................................................................  ....................
+#
+    43.13%  [.] leveldb::crc32c::Extend(unsigned int, char const*, unsigned long)
+     9.32%  [.] leveldb::Block::Iter::Seek(leveldb::Slice const&)
+     4.26%  [.] leveldb::ReadBlock(leveldb::RandomAccessFile*, leveldb::ReadOptions const&, leveldb::BlockHandle const&, leveldb::BlockContents*)
+     2.76%  [.] malloc
+     2.25%  [.] leveldb::InternalKeyComparator::Compare(leveldb::Slice const&, leveldb::Slice const&) const
+     2.08%  [.] leveldb::FindFile(leveldb::InternalKeyComparator const&, std::vector<leveldb::FileMetaData*, std::allocator<leveldb::FileMetaData*> > const&, leveldb::Slice const&)
+     1.71%  [.] leveldb::Block::Iter::ParseNextKey()
+     1.69%  [.] 0x00000000001986a5
+     1.59%  [.] leveldb::Block::NewIterator(leveldb::Comparator const*)
+     1.55%  [.] cfree
+     1.38%  [.] leveldb::(anonymous namespace)::BytewiseComparatorImpl::Compare(leveldb::Slice const&, leveldb::Slice const&) const
+     1.33%  [.] pthread_mutex_unlock
+     1.11%  [.] pthread_mutex_lock
+     1.04%  [.] 0x00000000001986b7
+     0.98%  [.] leveldb::(anonymous namespace)::ShardedLRUCache::Lookup(leveldb::Slice const&)
+     0.82%  [.] operator new(unsigned long)
+     0.82%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_append(char const*, unsigned long)
+     0.81%  [.] leveldb::Table::BlockReader(void*, leveldb::ReadOptions const&, leveldb::Slice const&)
+     0.65%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_mutate(unsigned long, unsigned long, char const*, unsigned long)
+     0.62%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::Seek(leveldb::Slice const&)
+     0.60%  [.] 0x000000000019869e
+     0.53%  [.] 0x00000000000a9cbd
+     0.47%  [.] 0x000000000000084a
+     0.43%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::status() const
+     0.39%  [.] leveldb::(anonymous namespace)::MergingIterator::Seek(leveldb::Slice const&)
+     0.36%  [.] leveldb::Table::NewIterator(leveldb::ReadOptions const&) const
+     0.36%  [.] leveldb::NewTwoLevelIterator(leveldb::Iterator*, leveldb::Iterator* (*)(void*, leveldb::ReadOptions const&, leveldb::Slice const&), void*, leveldb::ReadOptions const&)
+     0.30%  [.] leveldb::NewMergingIterator(leveldb::Comparator const*, leveldb::Iterator**, int)
+     0.28%  [.] void std::vector<leveldb::Iterator*, std::allocator<leveldb::Iterator*> >::_M_realloc_insert<leveldb::Iterator*>(__gnu_cxx::__normal_iterator<leveldb::Iterator**, std::vector<leveldb::Iterator*, std::allocator<leveldb::Iterator*> > >, leveldb::Iterator*&&)
+     0.28%  [.] leveldb::Version::AddIterators(leveldb::ReadOptions const&, std::vector<leveldb::Iterator*, std::allocator<leveldb::Iterator*> >*)
+     0.28%  [.] 0x00000000001986b3
+     0.26%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::~TwoLevelIterator()
+     0.26%  [.] leveldb::Hash(char const*, unsigned long, unsigned int)
+     0.25%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::SetDataIterator(leveldb::Iterator*)
+     0.25%  [.] strata::bench::(anonymous namespace)::BenchmarkRunner::RunSeekRandom()::{lambda(int, strata::bench::(anonymous namespace)::WorkerStats*)#1}::operator()(int, strata::bench::(anonymous namespace)::WorkerStats*) const
+     0.25%  [.] leveldb::(anonymous namespace)::TwoLevelIterator::InitDataBlock() [clone .part.0]
+     0.25%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_replace(unsigned long, unsigned long, char const*, unsigned long)
+     0.24%  [.] leveldb::(anonymous namespace)::ShardedLRUCache::Release(leveldb::Cache::Handle*)
+     0.23%  [.] strata::bench::(anonymous namespace)::CountingCache::Lookup(leveldb::Slice const&)
+     0.22%  [.] 0x00000000000ab3ed
+     0.20%  [.] 0x00000000001986bd
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

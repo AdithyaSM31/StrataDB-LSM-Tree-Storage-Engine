@@ -1,0 +1,17 @@
+device sdb, near cap means at least 224 MiB/s of 236
+workload     engine              ops/s   MiB/s  % near cap  reads/s  reads/op   KB/op
+readmissing  LevelDB            263586   144.6         0.0     1721      0.01     0.6
+readmissing  LevelDB-nommap     331406    43.3         0.0     2081      0.01     0.1
+readmissing  StrataDB           368622    17.4         0.0     2097      0.01     0.0
+readrandom   LevelDB              3726   235.6       100.0     2948      0.79    64.7
+readrandom   LevelDB-nommap       9454    68.4         0.0     7876      0.83     7.4
+readrandom   StrataDB             8435    60.6         0.0     6971      0.83     7.4
+scan         LevelDB              2930   235.1       100.0     4227      1.44    82.2
+scan         LevelDB-nommap       3616   133.1         0.0     8797      2.43    37.7
+scan         StrataDB             2798   102.6         0.0     6766      2.42    37.6
+seekrandom   LevelDB              3134   235.6       100.0     4245      1.35    77.0
+seekrandom   LevelDB-nommap       8069    60.3         0.0     7082      0.88     7.7
+seekrandom   StrataDB             6377    47.5         0.0     5577      0.87     7.6
+ycsbc        LevelDB              6729   235.6       100.0     3101      0.46    35.8
+ycsbc        LevelDB-nommap      20773    60.2         0.0     7129      0.34     3.0
+ycsbc        StrataDB            18152    51.7         0.0     6102      0.34     2.9

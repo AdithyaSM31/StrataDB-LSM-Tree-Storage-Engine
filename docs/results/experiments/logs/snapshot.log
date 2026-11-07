@@ -1,0 +1,624 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T000923Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    0 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.WFWYH8fr6r
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     205367.0     22.72      1.88      5.44    1060.32       0  new
+             block cache: 0 hits, 2081344 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       7390.8      0.82     81.10     81.10      81.10       0  fillrandom
+             reads: 1 ops, p50=81.10 p99=81.10 p999=81.10 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.WFWYH8fr6r
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T001613Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    0 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.K0dwrJrUHK
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     239559.3     26.50      1.98      5.58    1039.70       0  new
+             block cache: 0 hits, 2024645 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1      11587.2      1.28     32.70     32.70      32.70       0  fillrandom
+             reads: 1 ops, p50=32.70 p99=32.70 p999=32.70 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.K0dwrJrUHK
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T001945Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    2 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.JoyAlX4v89
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     179269.9     19.83      1.92      5.42    1070.03       0  new
+             block cache: 0 hits, 2032807 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       7147.9      0.79     87.00     87.00      87.00       0  fillrandom
+             reads: 1 ops, p50=87.00 p99=87.00 p999=87.00 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.JoyAlX4v89
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T002330Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    2 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.uPI3sGOBCC
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     229186.4     25.35      1.92      5.44    1049.00       0  new
+             block cache: 0 hits, 2054764 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1       6455.7      0.71    108.10    108.10     108.10       0  fillrandom
+             reads: 1 ops, p50=108.10 p99=108.10 p999=108.10 us
+             block cache: 0 hits, 2 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.uPI3sGOBCC
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T002606Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    4 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.EhxIDch3dl
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     174583.0     19.31      1.91      5.47    1071.78       0  new
+             block cache: 0 hits, 2032088 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       7127.5      0.79     84.90     84.90      84.90       0  fillrandom
+             reads: 1 ops, p50=84.90 p99=84.90 p999=84.90 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.EhxIDch3dl
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T002841Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    4 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.b9Wr0YK8Wx
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     229055.3     25.34      1.94      6.47    1048.58       0  new
+             block cache: 0 hits, 2033487 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1       4597.6      0.51    145.80    145.80     145.80       0  fillrandom
+             reads: 1 ops, p50=145.80 p99=145.80 p999=145.80 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.b9Wr0YK8Wx
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003051Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.VWt3cXUKTM
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     172630.5     19.10      1.95      5.70    1071.95       0  new
+             block cache: 0 hits, 2037460 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       6963.6      0.77     90.60     90.60      90.60       0  fillrandom
+             reads: 1 ops, p50=90.60 p99=90.60 p999=90.60 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.VWt3cXUKTM
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003304Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    6 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.QYQO2hYEEN
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     226646.2     25.07      1.89      5.46    1050.89       0  new
+             block cache: 0 hits, 2018414 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1      11682.0      1.29     31.10     31.10      31.10       0  fillrandom
+             reads: 1 ops, p50=31.10 p99=31.10 p999=31.10 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.QYQO2hYEEN
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003508Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    8 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.i3v5Mj2ALY
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     165802.8     18.34      1.84      5.54    1074.70       0  new
+             block cache: 0 hits, 2083183 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       3850.5      0.43    206.70    206.70     206.70       0  fillrandom
+             reads: 1 ops, p50=206.70 p99=206.70 p999=206.70 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.i3v5Mj2ALY
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003732Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    8 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.8w6ATStb6h
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     223327.6     24.71      1.91      5.42    1052.34       0  new
+             block cache: 0 hits, 2010606 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1      11186.1      1.24     34.10     34.10      34.10       0  fillrandom
+             reads: 1 ops, p50=34.10 p99=34.10 p999=34.10 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.8w6ATStb6h
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T003932Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.IuzzZprqvp
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     164372.7     18.18      1.86      5.47    1074.88       0  new
+             block cache: 0 hits, 2085998 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       5089.0      0.56    151.40    151.40     151.40       0  fillrandom
+             reads: 1 ops, p50=151.40 p99=151.40 p999=151.40 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.IuzzZprqvp
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T004148Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.EE117VH7ca
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     219399.2     24.27      1.92      5.45    1053.81       0  new
+             block cache: 0 hits, 2036530 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1       6622.4      0.73     96.70     96.70      96.70       0  fillrandom
+             reads: 1 ops, p50=96.70 p99=96.70 p999=96.70 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.EE117VH7ca
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T004348Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    14 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.cv4Q8IUW0a
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     161462.4     17.86      1.88      5.53    1075.90       0  new
+             block cache: 0 hits, 2024086 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       7077.0      0.78     85.90     85.90      85.90       0  fillrandom
+             reads: 1 ops, p50=85.90 p99=85.90 p999=85.90 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.cv4Q8IUW0a
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T004550Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    14 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.F2vkmGJUo0
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     213219.4     23.59      1.92      5.57    1056.84       0  new
+             block cache: 0 hits, 2026253 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1      10810.6      1.20     38.50     38.50      38.50       0  fillrandom
+             reads: 1 ops, p50=38.50 p99=38.50 p999=38.50 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.F2vkmGJUo0
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T010449Z
+Commit:          d605da2e67a0
+Engines:         strata
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.DFO6me4DDI
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+StrataDB   fillrandom              1     162969.1     18.03      1.88      5.74    1075.02       0  new
+             block cache: 0 hits, 2086026 misses, 0.0% hit rate
+StrataDB   ycsbc                   1       4257.1      0.47    181.40    181.40     181.40       0  fillrandom
+             reads: 1 ops, p50=181.40 p99=181.40 p999=181.40 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.DFO6me4DDI
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261107T010555Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      fillrandom,ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        1 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/exp
+CSV Output:      /tmp/tmp.XT5xAowPNn
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap fillrandom              1     222954.8     24.66      1.92      5.49    1052.41       0  new
+             block cache: 0 hits, 2017304 misses, 0.0% hit rate
+LevelDB-nommap ycsbc                   1       8642.9      0.96     31.70     31.70      31.70       0  fillrandom
+             reads: 1 ops, p50=31.70 p99=31.70 p999=31.70 us
+             block cache: 0 hits, 1 misses, 0.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /tmp/tmp.XT5xAowPNn

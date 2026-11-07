@@ -1,0 +1,48 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261106T174142Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      ycsbb
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/data
+CSV Output:      /home/azureuser/results-after/memory.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB    ycsbb                   1     312107.8     34.53      2.69      8.94      23.65       0  fillrandom
+             reads: 9500023 ops, p50=2.81 p99=8.86 p999=23.39 us | updates: 499977 ops, p50=2.40 p99=10.30 p999=93.90 us
+             block cache: 0 hits, 7040071 misses, 0.0% hit rate
+
+--- LevelDB Stats ---
+                               Compactions
+Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+--------------------------------------------------
+  0        0        0         0        0        25
+  1        0        0         0       26        44
+  2       39        5         3      544       527
+  3      505      998        25     5735      5715
+  4       55      112         3      585       584
+
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/results-after/memory.csv

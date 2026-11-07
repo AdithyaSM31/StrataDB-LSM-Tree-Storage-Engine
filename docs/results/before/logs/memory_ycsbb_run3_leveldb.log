@@ -1,0 +1,46 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261106T032943Z
+Commit:          2cdc2ebfbee8
+Engines:         leveldb
+Benchmarks:      ycsbb
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=no snappy=no tcmalloc=no
+LevelDB Reads:   mmap
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/data
+CSV Output:      /home/azureuser/results-10m/memory.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB    ycsbb                   1     256105.7     28.33      3.71     10.53      25.71       0  fillrandom
+             reads: 9500023 ops, p50=3.97 p99=10.53 p999=25.55 us | updates: 499977 ops, p50=2.48 p99=10.81 p999=101.31 us
+
+--- LevelDB Stats ---
+                               Compactions
+Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+--------------------------------------------------
+  0        0        0         0        0        28
+  1        0        0         0       28        41
+  2       36        7         2      445       429
+  3      505      997        32     6665      6644
+  4       54      110         3      632       630
+
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/results-10m/memory.csv

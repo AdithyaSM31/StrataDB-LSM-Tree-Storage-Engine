@@ -18,6 +18,7 @@ struct BenchmarkOptions {
   size_t block_cache_size = size_t{8} * 1024 * 1024;  // 0 turns the block cache off
   int bloom_filter_bits = 10;                         // 0 writes no filters
   int max_open_files = 1000;
+  bool group_commit = true;  // StrataDB only: LevelDB has no way to turn it off
   bool create_if_missing = true;
   bool error_if_exists = false;
 };
@@ -60,10 +61,16 @@ class BenchmarkAdapter {
   virtual std::string Stats() = 0;
   // Replaces *shapes with the files and bytes at each level, L0 first.
   virtual Status LevelShapes(std::vector<LevelShape>* shapes) = 0;
+  // Block cache lookups since Open, including those made by compactions.
+  virtual Status BlockCacheStats(uint64_t* hits, uint64_t* misses) = 0;
 };
 
 std::unique_ptr<BenchmarkAdapter> CreateStrataAdapter();
-std::unique_ptr<BenchmarkAdapter> CreateLevelDBAdapter();
+// LevelDB maps its table files by default, so its index and filter blocks stay in
+// the page cache and its data blocks never enter its block cache. With use_mmap
+// false it reads with pread, as StrataDB does, and reports its name as
+// "LevelDB-nommap". Both use the same files on disk.
+std::unique_ptr<BenchmarkAdapter> CreateLevelDBAdapter(bool use_mmap);
 
 }  // namespace strata::bench
 

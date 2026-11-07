@@ -1,0 +1,75 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 71K of event 'cpu-clock'
+# Event count (approx.): 71224224153
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  IPC   [IPC Coverage]
+# ........  ......................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+     9.00%  [k] rep_movs_alternative
+     6.80%  [.] strata::BloomFilterPolicy::KeyMayMatch(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >) const
+     6.66%  [.] strata::crc32c::internal::ExtendHardware(unsigned int, char const*, unsigned long)
+     5.55%  [.] strata::(anonymous namespace)::DecodeEntry(char const*, char const*, unsigned int*, unsigned int*, unsigned int*) [clone .constprop.0]
+     4.16%  [.] strata::ReadBlock(strata::RandomAccessFile const*, unsigned long, strata::BlockHandle const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*)
+     3.95%  [.] __libc_pread
+     3.27%  [.] 0x0000000000098659
+     3.16%  [.] strata::Block::Iter::Seek(std::basic_string_view<char, std::char_traits<char> >)
+     3.12%  [.] std::_Hashtable<std::basic_string_view<char, std::char_traits<char> >, std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> >, std::allocator<std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> > >, std::__detail::_Select1st, std::equal_to<std::basic_string_view<char, std::char_traits<char> > >, std::hash<std::basic_string_view<char, std::char_traits<char> > >, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits<true, false, true> >::_M_find_before_node(unsigned long, std::basic_string_view<char, std::char_traits<char> > const&, unsigned long) const
+     3.08%  [k] xas_load
+     3.01%  [.] std::_Hashtable<std::basic_string_view<char, std::char_traits<char> >, std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Table>::Entry> >, std::allocator<std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Table>::Entry> > >, std::__detail::_Select1st, std::equal_to<std::basic_string_view<char, std::char_traits<char> > >, std::hash<std::basic_string_view<char, std::char_traits<char> > >, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits<true, false, true> >::_M_find_before_node(unsigned long, std::basic_string_view<char, std::char_traits<char> > const&, unsigned long) const [clone .isra.0]
+     2.53%  [k] filemap_get_read_batch
+     2.42%  [.] strata::Version::Get(strata::ReadOptions const&, strata::LookupKey const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*, strata::TableCache*) const
+     1.86%  [.] strata::(anonymous namespace)::SearchFile(strata::ReadOptions const&, strata::FileMetaData const*, strata::LookupKey const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*, strata::TableCache*, strata::Status*)
+     1.69%  [.] strata::InternalKeyComparator::Compare(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >) const
+     1.67%  [.] 0x000000000019869e
+     1.66%  [.] strata::TableCache::FindTable(unsigned long, unsigned long, std::shared_ptr<strata::Table>*)
+     1.46%  [.] malloc
+     1.43%  [.] strata::LRUCache<strata::Block>::Insert(std::basic_string_view<char, std::char_traits<char> >, std::shared_ptr<strata::Block>, unsigned long)
+     1.43%  [.] 0x000000000019973a
+     1.41%  [.] 0x00000000001986a5
+     1.35%  [.] pthread_mutex_lock
+     1.24%  [.] strata::Block::Iter::ParseNextKey()
+     1.22%  [.] cfree
+     1.19%  [.] strata::Table::InternalGet(strata::ReadOptions const&, std::basic_string_view<char, std::char_traits<char> >, bool*, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*) const
+     1.12%  [.] std::__detail::_List_node_base::_M_transfer(std::__detail::_List_node_base*, std::__detail::_List_node_base*)
+     1.00%  [k] __fget_files
+     0.95%  [.] pthread_mutex_unlock
+     0.89%  [k] ext4_file_read_iter
+     0.80%  [.] strata::Table::BlockReader(strata::ReadOptions const&, std::basic_string_view<char, std::char_traits<char> >) const
+     0.78%  [.] strata::(anonymous namespace)::PosixRandomAccessFile::Read(unsigned long, unsigned long, std::basic_string_view<char, std::char_traits<char> >*, char*) const
+     0.74%  [.] 0x00000000001986b7
+     0.74%  [k] filemap_read
+     0.63%  [.] std::_Hash_bytes(void const*, unsigned long, unsigned long)
+     0.60%  [k] do_syscall_64
+     0.59%  [.] strata::Hash(char const*, unsigned long, unsigned int)
+     0.56%  [.] strata::bench::(anonymous namespace)::BenchmarkRunner::GetExistingKeys(unsigned long, unsigned long, strata::bench::(anonymous namespace)::WorkerStats*)
+     0.53%  [.] strata::DBImpl::Get(strata::ReadOptions const&, std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*)
+     0.52%  [.] 0x000000000000084a
+     0.50%  [k] _copy_to_iter
+     0.48%  [.] std::_Hashtable<std::basic_string_view<char, std::char_traits<char> >, std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Table>::Entry> >, std::allocator<std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Table>::Entry> > >, std::__detail::_Select1st, std::equal_to<std::basic_string_view<char, std::char_traits<char> > >, std::hash<std::basic_string_view<char, std::char_traits<char> > >, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits<true, false, true> >::find(std::basic_string_view<char, std::char_traits<char> > const&)
+     0.45%  [k] __xas_next
+     0.45%  [k] touch_atime
+     0.39%  [.] std::__detail::_Map_base<std::basic_string_view<char, std::char_traits<char> >, std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> >, std::allocator<std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> > >, std::__detail::_Select1st, std::equal_to<std::basic_string_view<char, std::char_traits<char> > >, std::hash<std::basic_string_view<char, std::char_traits<char> > >, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits<true, false, true>, true>::operator[](std::basic_string_view<char, std::char_traits<char> >&&)
+     0.39%  [.] 0x00000000000ab0a9
+     0.36%  [.] strata::PutFixed64(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*, unsigned long)
+     0.35%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_mutate(unsigned long, unsigned long, char const*, unsigned long)
+     0.34%  [.] std::__detail::_List_node_base::_M_unhook()
+     0.33%  [.] operator new(unsigned long)
+     0.30%  [k] aa_file_perm
+     0.28%  [k] vfs_read
+     0.27%  [.] strata::Histogram::Add(double)
+     0.27%  [.] 0x00000000000ab115
+     0.27%  [.] 0x00000000000ab50c
+     0.26%  [.] std::_Hashtable<std::basic_string_view<char, std::char_traits<char> >, std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> >, std::allocator<std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> > >, std::__detail::_Select1st, std::equal_to<std::basic_string_view<char, std::char_traits<char> > >, std::hash<std::basic_string_view<char, std::char_traits<char> > >, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits<true, false, true> >::find(std::basic_string_view<char, std::char_traits<char> > const&)
+     0.22%  [k] xas_start
+     0.22%  [k] filemap_get_pages
+     0.22%  [.] 0x00000000001986b3
+     0.20%  [.] memcmp@plt
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

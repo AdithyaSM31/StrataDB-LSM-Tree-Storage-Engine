@@ -1,0 +1,69 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 106K of event 'cpu-clock'
+# Event count (approx.): 106556556450
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  IPC   [IPC Coverage]
+# ........  ......................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    50.63%  [.] strata::crc32c::Extend(unsigned int, char const*, unsigned long)
+     2.86%  [k] rep_movs_alternative
+     2.15%  [.] strata::(anonymous namespace)::TwoLevelIterator::key() const
+     2.09%  [.] strata::(anonymous namespace)::MergingIterator::FindSmallest()
+     2.04%  [.] strata::(anonymous namespace)::DecodeEntry(char const*, char const*, unsigned int*, unsigned int*, unsigned int*) [clone .constprop.0]
+     1.81%  [.] 0x0000000000098659
+     1.55%  [.] strata::(anonymous namespace)::OwningBlockIterator::key() const
+     1.54%  [.] strata::(anonymous namespace)::TwoLevelIterator::Valid() const
+     1.36%  [.] __libc_pread
+     1.35%  [.] std::_Hashtable<std::basic_string_view<char, std::char_traits<char> >, std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> >, std::allocator<std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Block>::Entry> > >, std::__detail::_Select1st, std::equal_to<std::basic_string_view<char, std::char_traits<char> > >, std::hash<std::basic_string_view<char, std::char_traits<char> > >, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits<true, false, true> >::_M_find_before_node(unsigned long, std::basic_string_view<char, std::char_traits<char> > const&, unsigned long) const
+     1.33%  [.] strata::(anonymous namespace)::OwningBlockIterator::Valid() const
+     1.32%  [.] strata::(anonymous namespace)::TableIteratorWrapper::key() const
+     1.11%  [.] strata::Block::Iter::ParseNextKey()
+     1.02%  [.] strata::InternalKeyComparator::Compare(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >) const
+     0.99%  [.] strata::Block::Iter::Seek(std::basic_string_view<char, std::char_traits<char> >)
+     0.89%  [.] strata::ReadBlock(strata::RandomAccessFile const*, unsigned long, strata::BlockHandle const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*)
+     0.84%  [.] cfree
+     0.82%  [.] strata::(anonymous namespace)::TableIteratorWrapper::Valid() const
+     0.80%  [.] 0x00000000001986a5
+     0.79%  [.] malloc
+     0.78%  [.] strata::DBIter::FindNextUserEntry(bool, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*)
+     0.71%  [.] strata::(anonymous namespace)::TwoLevelIterator::SkipEmptyDataBlocksForward()
+     0.68%  [.] strata::LRUCache<strata::Block>::Insert(std::basic_string_view<char, std::char_traits<char> >, std::shared_ptr<strata::Block>, unsigned long)
+     0.66%  [.] 0x00000000001986b7
+     0.61%  [.] 0x000000000019973a
+     0.60%  [.] strata::DBIter::ParseKey(strata::ParsedInternalKey*)
+     0.50%  [.] strata::DBIter::Next()
+     0.48%  [.] strata::(anonymous namespace)::TwoLevelIterator::Next()
+     0.48%  [k] xas_load
+     0.45%  [k] filemap_get_read_batch
+     0.45%  [.] 0x000000000019869e
+     0.43%  [.] strata::Table::BlockReader(strata::ReadOptions const&, std::basic_string_view<char, std::char_traits<char> >) const
+     0.42%  [.] strata::Block::Iter::Valid() const
+     0.40%  [.] strata::(anonymous namespace)::PosixRandomAccessFile::Read(unsigned long, unsigned long, std::basic_string_view<char, std::char_traits<char> >*, char*) const
+     0.38%  [.] std::_Hashtable<std::basic_string_view<char, std::char_traits<char> >, std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Table>::Entry> >, std::allocator<std::pair<std::basic_string_view<char, std::char_traits<char> > const, std::_List_iterator<strata::LRUCache<strata::Table>::Entry> > >, std::__detail::_Select1st, std::equal_to<std::basic_string_view<char, std::char_traits<char> > >, std::hash<std::basic_string_view<char, std::char_traits<char> > >, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits<true, false, true> >::_M_find_before_node(unsigned long, std::basic_string_view<char, std::char_traits<char> > const&, unsigned long) const [clone .isra.0]
+     0.37%  [.] strata::(anonymous namespace)::BytewiseComparatorImpl::Compare(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >) const
+     0.33%  [.] std::_Hash_bytes(void const*, unsigned long, unsigned long)
+     0.33%  [.] strata::(anonymous namespace)::MergingIterator::key() const
+     0.31%  [.] 0x00000000000ab0a9
+     0.28%  [k] filemap_read
+     0.28%  [.] strata::Block::Iter::key() const
+     0.27%  [k] __fget_files
+     0.26%  [.] strata::(anonymous namespace)::MergingIterator::Next()
+     0.25%  [.] strata::(anonymous namespace)::LevelFileIndexIterator::Seek(std::basic_string_view<char, std::char_traits<char> >)
+     0.25%  [.] 0x00000000000a9ce6
+     0.24%  [.] strata::bench::(anonymous namespace)::BenchmarkRunner::RunScan()::{lambda(int, strata::bench::(anonymous namespace)::WorkerStats*)#1}::operator()(int, strata::bench::(anonymous namespace)::WorkerStats*) const
+     0.24%  [.] strata::(anonymous namespace)::TwoLevelIterator::value() const
+     0.22%  [.] pthread_mutex_lock
+     0.22%  [.] strata::ParseInternalKey(std::basic_string_view<char, std::char_traits<char> >, strata::ParsedInternalKey*)
+     0.21%  [.] std::__detail::_List_node_base::_M_transfer(std::__detail::_List_node_base*, std::__detail::_List_node_base*)
+     0.21%  [k] ext4_file_read_iter
+     0.20%  [.] memcmp@plt
+     0.20%  [.] 0x00000000001986b3
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

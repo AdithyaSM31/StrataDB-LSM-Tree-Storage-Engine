@@ -2444,6 +2444,90 @@ TEST_F(DBTest, GroupCommitHappens) {
   EXPECT_EQ(env_ptr->wal_sync_count(), 2);
 }
 
+TEST_F(DBTest, GroupCommitOffSyncsEveryWrite) {
+  auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
+  GroupCommitTestEnv* env_ptr = test_env.get();
+  custom_env_ = std::move(test_env);
+
+  Options opts;
+  opts.create_if_missing = true;
+  opts.env = env_ptr;
+  opts.group_commit = false;
+  ASSERT_TRUE(Open(opts).ok());
+
+  env_ptr->reset_wal_sync_count();
+  env_ptr->HoldNextSync();
+
+  std::vector<std::thread> writers;
+  std::vector<Status> statuses(10);
+  const auto write = [this, &statuses](int i) {
+    WriteOptions wo;
+    wo.sync = true;
+    statuses[static_cast<size_t>(i)] = Put("k" + std::to_string(i), "v" + std::to_string(i), wo);
+  };
+
+  // The same setup as GroupCommitHappens: one leader held in its sync, with nine
+  // writers queued behind it. With group commit they would share one more sync.
+  writers.emplace_back(write, 0);
+  EXPECT_TRUE(env_ptr->WaitForSyncToHold());
+  for (int i = 1; i < 10; ++i) {
+    writers.emplace_back(write, i);
+  }
+  EXPECT_TRUE(WaitForQueuedWriters(10));
+  env_ptr->ReleaseSync();
+
+  for (auto& t : writers) {
+    t.join();
+  }
+
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_TRUE(statuses[static_cast<size_t>(i)].ok());
+    EXPECT_EQ(Get("k" + std::to_string(i)), "v" + std::to_string(i));
+  }
+  EXPECT_EQ(env_ptr->wal_sync_count(), 10);
+}
+
+TEST_F(DBTest, BlockCacheHitAndMissProperties) {
+  Options opts;
+  opts.create_if_missing = true;
+  ASSERT_TRUE(Open(opts).ok());
+
+  const auto property = [this](const char* name) {
+    std::string value;
+    EXPECT_TRUE(db_->GetProperty(name, &value));
+    return std::stoull(value);
+  };
+  EXPECT_EQ(property("strata.block-cache-hits"), 0U);
+  EXPECT_EQ(property("strata.block-cache-misses"), 0U);
+
+  ASSERT_TRUE(Put("key", "value").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+
+  // The block isn't cached yet, so the first read misses and the second hits.
+  EXPECT_EQ(Get("key"), "value");
+  EXPECT_EQ(property("strata.block-cache-hits"), 0U);
+  EXPECT_EQ(property("strata.block-cache-misses"), 1U);
+  EXPECT_EQ(Get("key"), "value");
+  EXPECT_EQ(property("strata.block-cache-hits"), 1U);
+  EXPECT_EQ(property("strata.block-cache-misses"), 1U);
+}
+
+TEST_F(DBTest, BlockCachePropertiesAreZeroWithNoCache) {
+  Options opts;
+  opts.create_if_missing = true;
+  opts.block_cache_capacity = 0;
+  ASSERT_TRUE(Open(opts).ok());
+  ASSERT_TRUE(Put("key", "value").ok());
+  ASSERT_TRUE(db_->Flush().ok());
+  EXPECT_EQ(Get("key"), "value");
+
+  std::string value;
+  ASSERT_TRUE(db_->GetProperty("strata.block-cache-hits", &value));
+  EXPECT_EQ(value, "0");
+  ASSERT_TRUE(db_->GetProperty("strata.block-cache-misses", &value));
+  EXPECT_EQ(value, "0");
+}
+
 TEST_F(DBTest, NoUnsyncedSyncWrites) {
   auto test_env = std::make_unique<GroupCommitTestEnv>(Env::Default());
   GroupCommitTestEnv* env_ptr = test_env.get();

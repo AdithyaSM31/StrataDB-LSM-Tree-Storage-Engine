@@ -9,3 +9,4 @@ compile_commands.json
 perf.data*
 /bench/results/
 strata_bench_data/
+__pycache__/

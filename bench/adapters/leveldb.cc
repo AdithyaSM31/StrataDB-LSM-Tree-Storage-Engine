@@ -1,5 +1,11 @@
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -10,6 +16,7 @@
 #include "bench/adapter.h"
 #include "leveldb/cache.h"
 #include "leveldb/db.h"
+#include "leveldb/env.h"
 #include "leveldb/filter_policy.h"
 #include "leveldb/iterator.h"
 #include "leveldb/options.h"
@@ -50,6 +57,77 @@ leveldb::ReadOptions VerifyingReadOptions() {
   return opts;
 }
 
+class PreadFile final : public leveldb::RandomAccessFile {
+ public:
+  PreadFile(int fd, std::string name) : fd_(fd), name_(std::move(name)) {}
+  ~PreadFile() override { ::close(fd_); }
+
+  leveldb::Status Read(uint64_t offset, size_t n, leveldb::Slice* result,
+                       char* scratch) const override {
+    const ssize_t bytes = ::pread(fd_, scratch, n, static_cast<off_t>(offset));
+    if (bytes < 0) {
+      *result = leveldb::Slice(scratch, 0);
+      return leveldb::Status::IOError(name_, std::strerror(errno));
+    }
+    *result = leveldb::Slice(scratch, static_cast<size_t>(bytes));
+    return leveldb::Status::OK();
+  }
+
+ private:
+  const int fd_;
+  const std::string name_;
+};
+
+// Returning data in the caller's scratch buffer is what makes LevelDB keep index
+// and filter blocks on its heap and put data blocks in its block cache.
+class NoMmapEnv final : public leveldb::EnvWrapper {
+ public:
+  NoMmapEnv() : EnvWrapper(leveldb::Env::Default()) {}
+
+  leveldb::Status NewRandomAccessFile(const std::string& fname,
+                                      leveldb::RandomAccessFile** result) override {
+    *result = nullptr;
+    const int fd = ::open(fname.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+      return leveldb::Status::IOError(fname, std::strerror(errno));
+    }
+    *result = new PreadFile(fd, fname);
+    return leveldb::Status::OK();
+  }
+};
+
+// LevelDB's cache has no hit counters, so count at its interface. With mmap reads
+// data blocks are never inserted, so every lookup misses, which is what really
+// happens there.
+class CountingCache final : public leveldb::Cache {
+ public:
+  explicit CountingCache(size_t capacity) : target_(leveldb::NewLRUCache(capacity)) {}
+
+  Handle* Insert(const leveldb::Slice& key, void* value, size_t charge,
+                 void (*deleter)(const leveldb::Slice& key, void* value)) override {
+    return target_->Insert(key, value, charge, deleter);
+  }
+  Handle* Lookup(const leveldb::Slice& key) override {
+    Handle* const handle = target_->Lookup(key);
+    (handle != nullptr ? hits_ : misses_).fetch_add(1, std::memory_order_relaxed);
+    return handle;
+  }
+  void Release(Handle* handle) override { target_->Release(handle); }
+  void* Value(Handle* handle) override { return target_->Value(handle); }
+  void Erase(const leveldb::Slice& key) override { target_->Erase(key); }
+  uint64_t NewId() override { return target_->NewId(); }
+  void Prune() override { target_->Prune(); }
+  size_t TotalCharge() const override { return target_->TotalCharge(); }
+
+  uint64_t hits() const { return hits_.load(std::memory_order_relaxed); }
+  uint64_t misses() const { return misses_.load(std::memory_order_relaxed); }
+
+ private:
+  std::unique_ptr<leveldb::Cache> target_;
+  std::atomic<uint64_t> hits_{0};
+  std::atomic<uint64_t> misses_{0};
+};
+
 class LevelDBCursor : public BenchmarkCursor {
  public:
   explicit LevelDBCursor(leveldb::Iterator* iter) : iter_(iter) {}
@@ -75,7 +153,11 @@ class LevelDBCursor : public BenchmarkCursor {
 
 class LevelDBAdapter final : public BenchmarkAdapter {
  public:
-  LevelDBAdapter() = default;
+  explicit LevelDBAdapter(bool use_mmap) {
+    if (!use_mmap) {
+      no_mmap_env_ = std::make_unique<NoMmapEnv>();
+    }
+  }
   ~LevelDBAdapter() override { CloseDatabase(); }
 
   Status Open(const std::string& dbname, const BenchmarkOptions& options) override {
@@ -86,6 +168,9 @@ class LevelDBAdapter final : public BenchmarkAdapter {
     l_opts.write_buffer_size = options.write_buffer_size;
     l_opts.block_size = options.block_size;
     l_opts.max_open_files = options.max_open_files;
+    if (no_mmap_env_ != nullptr) {
+      l_opts.env = no_mmap_env_.get();
+    }
 
     // StrataDB does not compress.
     l_opts.compression = leveldb::kNoCompression;
@@ -95,7 +180,7 @@ class LevelDBAdapter final : public BenchmarkAdapter {
 
     // Always pass a cache: with none, LevelDB creates its own 8 MB cache, while
     // capacity 0 really does turn caching off.
-    cache_.reset(leveldb::NewLRUCache(options.block_cache_size));
+    cache_ = std::make_unique<CountingCache>(options.block_cache_size);
     l_opts.block_cache = cache_.get();
 
     if (options.bloom_filter_bits > 0) {
@@ -157,7 +242,9 @@ class LevelDBAdapter final : public BenchmarkAdapter {
     return std::make_unique<LevelDBCursor>(db_->NewIterator(VerifyingReadOptions()));
   }
 
-  std::string Name() const override { return "LevelDB"; }
+  std::string Name() const override {
+    return no_mmap_env_ != nullptr ? "LevelDB-nommap" : "LevelDB";
+  }
 
   std::string Stats() override {
     std::string stats;
@@ -197,6 +284,15 @@ class LevelDBAdapter final : public BenchmarkAdapter {
     return Status::OK();
   }
 
+  Status BlockCacheStats(uint64_t* hits, uint64_t* misses) override {
+    if (cache_ == nullptr) {
+      return Status::InvalidArgument("DB is not open");
+    }
+    *hits = cache_->hits();
+    *misses = cache_->misses();
+    return Status::OK();
+  }
+
  private:
   // The database uses the cache and the filter policy, so it must go first.
   void CloseDatabase() {
@@ -205,13 +301,14 @@ class LevelDBAdapter final : public BenchmarkAdapter {
     filter_policy_.reset();
   }
 
+  std::unique_ptr<NoMmapEnv> no_mmap_env_;  // null when LevelDB uses its default mmap reads
   std::unique_ptr<const leveldb::FilterPolicy> filter_policy_;
-  std::unique_ptr<leveldb::Cache> cache_;
+  std::unique_ptr<CountingCache> cache_;
   std::unique_ptr<leveldb::DB> db_;
 };
 
-std::unique_ptr<BenchmarkAdapter> CreateLevelDBAdapter() {
-  return std::make_unique<LevelDBAdapter>();
+std::unique_ptr<BenchmarkAdapter> CreateLevelDBAdapter(bool use_mmap) {
+  return std::make_unique<LevelDBAdapter>(use_mmap);
 }
 
 }  // namespace strata::bench

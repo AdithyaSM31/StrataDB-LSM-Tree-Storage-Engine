@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -49,6 +50,7 @@ class StrataAdapter final : public BenchmarkAdapter {
     s_opts.block_cache_capacity = options.block_cache_size;
     s_opts.bloom_bits_per_key = options.bloom_filter_bits;
     s_opts.max_open_files = options.max_open_files;
+    s_opts.group_commit = options.group_commit;
     return DB::Open(s_opts, dbname, &db_);
   }
 
@@ -125,6 +127,18 @@ class StrataAdapter final : public BenchmarkAdapter {
     if (shapes->empty()) {
       return Status::Corruption("could not parse strata.stats");
     }
+    return Status::OK();
+  }
+
+  Status BlockCacheStats(uint64_t* hits, uint64_t* misses) override {
+    std::string hit_count;
+    std::string miss_count;
+    if (!db_ || !db_->GetProperty("strata.block-cache-hits", &hit_count) ||
+        !db_->GetProperty("strata.block-cache-misses", &miss_count)) {
+      return Status::InvalidArgument("block cache properties are not available");
+    }
+    *hits = std::strtoull(hit_count.c_str(), nullptr, 10);
+    *misses = std::strtoull(miss_count.c_str(), nullptr, 10);
     return Status::OK();
   }
 

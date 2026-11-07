@@ -71,3 +71,25 @@ jobs:
             echo "strata_bench accepted a NaN theta"
             exit 1
           fi
+          # So does a LevelDB read mode that doesn't exist.
+          if ./build/bench/strata_bench --leveldb_mmap=2 --benchmarks=readrandom; then
+            echo "strata_bench accepted a bad --leveldb_mmap"
+            exit 1
+          fi
+
+      - name: Benchmark feature test
+        if: matrix.preset == 'release'
+        run: bash bench/strata_bench_test.sh
+
+      - name: Experiments test
+        if: matrix.preset == 'release'
+        run: bash bench/run_experiments_test.sh
+
+      - name: Benchmark runner test
+        if: matrix.preset == 'release'
+        run: |
+          # A killed run has to fail the script, not vanish from the medians.
+          bash bench/run_benchmarks_test.sh
+          # Both tiers end to end, including the memory limit and every check on the results.
+          ./bench/run_benchmarks.sh --skip-build --skip-fio --num=10K --sync-num=20 --ycsb-ops=100K \
+              --runs=2 --memory-limit=64M --db-dir="$RUNNER_TEMP/bench_db" --output-dir="$RUNNER_TEMP/bench_out"

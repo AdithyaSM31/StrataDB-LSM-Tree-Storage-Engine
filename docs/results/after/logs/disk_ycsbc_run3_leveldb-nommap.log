@@ -1,0 +1,37 @@
+================================================================================
+StrataDB Benchmark Harness
+================================================================================
+Run ID:          20261106T235046Z
+Commit:          d605da2e67a0
+Engines:         leveldb
+Benchmarks:      ycsbc
+Entries:         10000000
+Value Size:      100 bytes
+Key Size:        16 bytes
+Threads:         1
+Write Buffer:    4194304 bytes
+Block Size:      4096 bytes
+Block Cache:     8388608 bytes
+Bloom Filter:    10 bits/key
+Max Open Files:  1000
+Writer Rate:     10000 writes/s (readwhilewriting)
+Compression:     none on both engines
+Checksums:       every block read verified on both engines
+LevelDB Build:   1.23 crc32c=yes snappy=no tcmalloc=no
+LevelDB Reads:   pread
+Group Commit:    on
+YCSB Ops:        10000000 (per workload)
+Zipf Theta:      0.99
+DB Directory:    /mnt/strata/data
+CSV Output:      /home/azureuser/results-after/disk.csv
+================================================================================
+
+--------------------------------------------------------------------------------------------------------------------------
+Engine     Workload          Threads      Ops/sec      MB/s  p50 (us)  p99 (us) p99.9 (us)  Errors  Dataset
+--------------------------------------------------------------------------------------------------------------------------
+LevelDB-nommap ycsbc                   1      20917.6      2.31      7.32    251.48     400.08       0  fillrandom
+             reads: 10000000 ops, p50=7.32 p99=251.48 p999=400.08 us
+             block cache: 3712299 hits, 6607645 misses, 36.0% hit rate
+--------------------------------------------------------------------------------------------------------------------------
+
+Results written to: /home/azureuser/results-after/disk.csv
